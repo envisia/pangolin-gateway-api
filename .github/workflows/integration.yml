@@ -1,0 +1,137 @@
+name: Integration (cluster)
+
+# Manual-only: spinning up kind + installing CRDs costs ~3 minutes per run and
+# the test exercises real network/API plumbing. Triggered via the Actions tab
+# or `gh workflow run integration.yml`.
+on:
+  workflow_dispatch:
+    inputs:
+      kind_version:
+        description: kind release to use
+        required: false
+        default: v0.24.0
+      gateway_api_version:
+        description: Gateway API release to install (experimental channel)
+        required: false
+        default: v1.5.1
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+
+jobs:
+  cluster-integration:
+    name: cluster-integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          rustflags: -D warnings
+
+      - name: Cache cargo registry/target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: integration
+
+      - name: Install kind
+        run: |
+          curl -fsSL -o kind \
+            "https://kind.sigs.k8s.io/dl/${{ inputs.kind_version }}/kind-linux-amd64"
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+          kind version
+
+      - name: Create kind cluster
+        run: |
+          kind create cluster --name integration --wait 90s
+          kubectl cluster-info
+          kubectl get nodes -o wide
+
+      - name: Install Gateway API experimental CRDs
+        run: |
+          kubectl apply -f \
+            "https://github.com/kubernetes-sigs/gateway-api/releases/download/${{ inputs.gateway_api_version }}/experimental-install.yaml"
+
+      - name: Wait for CRDs to be established
+        run: |
+          for crd in \
+            httproutes.gateway.networking.k8s.io \
+            listenersets.gateway.networking.k8s.io \
+            gateways.gateway.networking.k8s.io; do
+            kubectl wait --for=condition=Established --timeout=60s "crd/$crd"
+          done
+
+      - name: Create controller namespace
+        run: kubectl create namespace pangolin-system
+
+      - name: Build mock_pangolin example
+        run: cargo build --locked --example mock_pangolin
+
+      - name: Start mock_pangolin (background)
+        env:
+          MOCK_PANGOLIN_LISTEN: 127.0.0.1:18080
+          MOCK_PANGOLIN_FIXTURE: tests/fixtures/integration-minimal.json
+        run: |
+          # nohup so the process survives the step boundary; redirect logs.
+          nohup target/debug/examples/mock_pangolin > mock_pangolin.log 2>&1 &
+          echo $! > mock_pangolin.pid
+          # Wait for the listener.
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18080/api/v1/traefik-config; then
+              echo "mock_pangolin up after ${i} attempts"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "mock_pangolin did not come up; logs:"
+          cat mock_pangolin.log
+          exit 1
+
+      - name: Run cluster integration test
+        env:
+          INTEGRATION_PANGOLIN_URL: http://127.0.0.1:18080/api/v1/traefik-config
+          INTEGRATION_NAMESPACE: pangolin-system
+          INTEGRATION_PARENT_GATEWAY: eg
+          RUST_LOG: info,kube=info,pangolin_gateway_controller=debug
+        run: |
+          cargo test --locked --test cluster_integration -- \
+            --ignored --nocapture --test-threads=1
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          echo "=== mock_pangolin log ==="
+          cat mock_pangolin.log || true
+          echo "=== nodes ==="
+          kubectl get nodes -o wide || true
+          echo "=== all namespaces ==="
+          kubectl get ns || true
+          echo "=== pangolin-system contents ==="
+          kubectl -n pangolin-system get \
+            httproute,listenerset,service,endpointslice -o wide || true
+          echo "=== HTTPRoute describe ==="
+          kubectl -n pangolin-system describe httproute || true
+          echo "=== ListenerSet describe ==="
+          kubectl -n pangolin-system describe listenerset || true
+
+      - name: Stop mock_pangolin
+        if: always()
+        run: |
+          if [ -f mock_pangolin.pid ]; then
+            kill "$(cat mock_pangolin.pid)" 2>/dev/null || true
+          fi
+
+      - name: Delete kind cluster
+        if: always()
+        run: kind delete cluster --name integration || true
