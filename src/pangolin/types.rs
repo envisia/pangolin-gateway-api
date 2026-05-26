@@ -7,7 +7,8 @@
 //!
 //! Some fields are deserialized but not yet consumed — they're kept so the schema is
 //! self-documenting and so we don't silently drop information when downstream features land.
-#![allow(dead_code)]
+//! Because this crate is a library, the `pub` fields are part of its public API and
+//! the dead-code lint doesn't fire for them.
 
 use std::collections::BTreeMap;
 

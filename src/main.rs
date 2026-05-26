@@ -1,22 +1,20 @@
+//! Binary entrypoint. All real logic lives in the `pangolin_gateway_controller` library.
+
 use std::process::ExitCode;
 
 use anyhow::Context;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
-mod apply;
-mod config;
-mod envoy_gateway;
-mod gc;
-mod pangolin;
-mod reconcile;
-mod transform;
+use pangolin_gateway_controller::{config::Config, pangolin, reconcile};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     init_tracing();
 
-    let cfg = match config::Config::from_env() {
+    let cfg = match Config::from_env() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("invalid configuration: {e:#}");
@@ -42,16 +40,11 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-async fn run(
-    cfg: config::Config,
-    shutdown: tokio_util::sync::CancellationToken,
-) -> anyhow::Result<()> {
+async fn run(cfg: Config, shutdown: tokio_util::sync::CancellationToken) -> anyhow::Result<()> {
     let kube = kube::Client::try_default()
         .await
         .context("connecting to Kubernetes API")?;
-
     let pangolin_client = pangolin::Client::new(&cfg).context("building pangolin HTTP client")?;
-
     reconcile::run_loop(cfg, kube, pangolin_client, shutdown).await
 }
 
@@ -77,6 +70,3 @@ fn init_tracing() {
         .with(layer)
         .init();
 }
-
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;

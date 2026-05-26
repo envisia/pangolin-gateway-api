@@ -10,6 +10,10 @@ readme = "README.md"
 keywords = ["kubernetes", "gateway-api", "envoy", "pangolin", "controller"]
 categories = ["network-programming"]
 
+[lib]
+name = "pangolin_gateway_controller"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pangolin-gateway-controller"
 path = "src/main.rs"

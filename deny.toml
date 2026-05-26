@@ -21,7 +21,6 @@ allow = [
     "BSD-3-Clause",
     "BSL-1.0",
     "CC0-1.0",
-    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "MIT-0",
@@ -32,6 +31,17 @@ allow = [
     "OpenSSL",
 ]
 confidence-threshold = 0.8
+# Per-crate license exceptions. Keep this list tiny and intentional — a license
+# allowed here is allowed *only* for the named crate, so a future dependency
+# under the same license still requires an explicit policy decision.
+exceptions = [
+    # webpki-roots ships Mozilla's CA bundle under the Linux Foundation's
+    # Community Data License Agreement (Permissive 2.0). Functionally
+    # equivalent to MIT/BSD for our redistribution purposes: permissive,
+    # no copyleft, no extra obligations on derived binaries. See
+    # https://cdla.dev/permissive-2-0/ for the full text.
+    { allow = ["CDLA-Permissive-2.0"], name = "webpki-roots" },
+]
 
 [bans]
 multiple-versions = "warn"

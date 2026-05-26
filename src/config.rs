@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -16,13 +14,11 @@ pub struct Config {
     pub max_response_body_bytes: u64,
     pub tls_skip_verify: bool,
     pub ca_file: Option<String>,
-    pub allow_insecure_http: bool,
 
     pub namespace: String,
     pub parent_gateway: String,
     pub parent_gateway_namespace: Option<String>,
     pub listener_set_name: String,
-    pub gateway_class: Option<String>,
 
     pub http_port: i32,
     pub https_port: i32,
@@ -98,8 +94,7 @@ impl Config {
                  I_UNDERSTAND_CONFIG_TLS_SKIP_VERIFY_IS_INSECURE=true to be explicitly set"
             );
         }
-        let allow_insecure_http = bool_env("CONFIG_ALLOW_INSECURE_HTTP", false)?;
-        if pangolin_endpoint.scheme() == "http" && !allow_insecure_http {
+        if pangolin_endpoint.scheme() == "http" && !bool_env("CONFIG_ALLOW_INSECURE_HTTP", false)? {
             bail!(
                 "CONFIG_ENDPOINT uses http://. Set CONFIG_ALLOW_INSECURE_HTTP=true to permit it."
             );
@@ -114,14 +109,12 @@ impl Config {
             max_response_body_bytes: u64_env("CONFIG_MAX_RESPONSE_BODY_BYTES", 16 * 1024 * 1024)?,
             tls_skip_verify,
             ca_file: optional_env("CONFIG_CA_FILE"),
-            allow_insecure_http,
 
             namespace: optional_env("CONFIG_NAMESPACE").unwrap_or_else(|| "default".into()),
             parent_gateway: required_env("CONFIG_PARENT_GATEWAY")?,
             parent_gateway_namespace: optional_env("CONFIG_PARENT_GATEWAY_NAMESPACE"),
             listener_set_name: optional_env("CONFIG_LISTENERSET_NAME")
                 .unwrap_or_else(|| "pangolin".into()),
-            gateway_class: optional_env("CONFIG_GATEWAY_CLASS"),
 
             http_port: i32_env("CONFIG_HTTP_PORT", 80)?,
             https_port: i32_env("CONFIG_HTTPS_PORT", 443)?,
