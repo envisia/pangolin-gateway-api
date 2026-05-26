@@ -1,0 +1,178 @@
+name: Integration (cluster)
+
+# Triggered manually, or on a PR that carries the `integration` label.
+#
+# Owner-gating: only repo collaborators with at least triage permission can
+# add labels to a PR, so external contributors can't kick off these runs by
+# themselves. The owner adds the `integration` label when they want CI to run
+# the cluster suite for a PR; pushes to the PR after that re-trigger via
+# `synchronize` as long as the label is still on.
+on:
+  workflow_dispatch:
+    inputs:
+      kind_version:
+        description: kind release to use
+        required: false
+        default: v0.24.0
+      gateway_api_version:
+        description: Gateway API release (experimental channel)
+        required: false
+        default: v1.5.1
+      envoy_gateway_version:
+        description: Envoy Gateway release (only Backend CRD is installed)
+        required: false
+        default: v1.2.4
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+  KIND_VERSION: ${{ inputs.kind_version || 'v0.24.0' }}
+  GATEWAY_API_VERSION: ${{ inputs.gateway_api_version || 'v1.5.1' }}
+  ENVOY_GATEWAY_VERSION: ${{ inputs.envoy_gateway_version || 'v1.2.4' }}
+
+jobs:
+  cluster-integration:
+    name: integration (${{ matrix.mode }})
+    # Run on manual dispatch, or when the PR carries the `integration` label.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'integration'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: service
+            fixture: tests/fixtures/integration-minimal.json
+            test_name: controller_reconciles_service_backends
+            install_envoy_backend_crd: false
+          - mode: envoy-backend
+            fixture: tests/fixtures/integration-envoy-backend.json
+            test_name: controller_reconciles_envoy_backends
+            install_envoy_backend_crd: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          rustflags: -D warnings
+
+      - name: Cache cargo registry/target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: integration-${{ matrix.mode }}
+
+      - name: Install kind
+        run: |
+          curl -fsSL -o kind \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+          kind version
+
+      - name: Create kind cluster
+        run: |
+          kind create cluster --name "integration-${{ matrix.mode }}" --wait 90s
+          kubectl cluster-info
+          kubectl get nodes -o wide
+
+      - name: Install Gateway API experimental CRDs
+        # Server-side apply is required: the HTTPRoute v1.5.1 CRD is large
+        # enough that client-side apply blows past the 256 KiB cap on
+        # `kubectl.kubernetes.io/last-applied-configuration`.
+        run: |
+          kubectl apply --server-side --force-conflicts -f \
+            "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/experimental-install.yaml"
+          for crd in \
+            httproutes.gateway.networking.k8s.io \
+            listenersets.gateway.networking.k8s.io \
+            gateways.gateway.networking.k8s.io; do
+            kubectl wait --for=condition=Established --timeout=60s "crd/$crd"
+          done
+
+      - name: Install Envoy Gateway Backend CRD
+        if: matrix.install_envoy_backend_crd
+        run: |
+          kubectl apply --server-side --force-conflicts -f \
+            "https://raw.githubusercontent.com/envoyproxy/gateway/${ENVOY_GATEWAY_VERSION}/charts/gateway-helm/crds/generated/gateway.envoyproxy.io_backends.yaml"
+          kubectl wait --for=condition=Established --timeout=60s \
+            crd/backends.gateway.envoyproxy.io
+
+      - name: Create controller namespace
+        run: kubectl create namespace pangolin-system
+
+      - name: Build mock_pangolin example
+        run: cargo build --locked --example mock_pangolin
+
+      - name: Start mock_pangolin (background)
+        env:
+          MOCK_PANGOLIN_LISTEN: 127.0.0.1:18080
+          MOCK_PANGOLIN_FIXTURE: ${{ matrix.fixture }}
+        run: |
+          nohup target/debug/examples/mock_pangolin > mock_pangolin.log 2>&1 &
+          echo $! > mock_pangolin.pid
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18080/api/v1/traefik-config; then
+              echo "mock_pangolin up after ${i} attempts"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "mock_pangolin did not come up; logs:"
+          cat mock_pangolin.log
+          exit 1
+
+      - name: Run cluster integration test (${{ matrix.mode }})
+        env:
+          INTEGRATION_PANGOLIN_URL: http://127.0.0.1:18080/api/v1/traefik-config
+          INTEGRATION_NAMESPACE: pangolin-system
+          INTEGRATION_PARENT_GATEWAY: eg
+          RUST_LOG: info,kube=info,pangolin_gateway_controller=debug
+        run: |
+          cargo test --locked --test cluster_integration ${{ matrix.test_name }} -- \
+            --ignored --exact --nocapture --test-threads=1
+
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          echo "=== mock_pangolin log ==="
+          cat mock_pangolin.log || true
+          echo "=== nodes ==="
+          kubectl get nodes -o wide || true
+          echo "=== pangolin-system ==="
+          kubectl -n pangolin-system get \
+            httproute,listenerset,service,endpointslice,backend.gateway.envoyproxy.io \
+            -o wide 2>/dev/null || true
+          echo "=== HTTPRoute describe ==="
+          kubectl -n pangolin-system describe httproute || true
+          echo "=== ListenerSet describe ==="
+          kubectl -n pangolin-system describe listenerset || true
+          echo "=== Envoy Backend describe ==="
+          kubectl -n pangolin-system describe backend.gateway.envoyproxy.io 2>/dev/null || true
+
+      - name: Stop mock_pangolin
+        if: always()
+        run: |
+          if [ -f mock_pangolin.pid ]; then
+            kill "$(cat mock_pangolin.pid)" 2>/dev/null || true
+          fi
+
+      - name: Delete kind cluster
+        if: always()
+        run: kind delete cluster --name "integration-${{ matrix.mode }}" || true
