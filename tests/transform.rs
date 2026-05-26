@@ -154,10 +154,14 @@ fn envoy_backend_mode_does_not_synthesize_services() {
 
     // The upstream fixtures only carry cluster-DNS targets, which still resolve
     // to a direct Service backendRef in both modes — but never to a synthesized
-    // Service object.
+    // Service object. Redirect-only routers have no backendRefs by design
+    // (Gateway API CEL: RequestRedirect + backendRefs are mutually exclusive).
     for route in desired.http_routes.values() {
         for rule in route.spec.rules.as_ref().unwrap() {
-            for r in rule.backend_refs.as_ref().unwrap() {
+            let Some(refs) = rule.backend_refs.as_ref() else {
+                continue;
+            };
+            for r in refs {
                 assert_eq!(r.kind.as_deref(), Some("Service"));
                 assert_eq!(r.group.as_deref(), Some(""));
             }
@@ -256,4 +260,87 @@ fn service_mode_drops_bare_fqdn() {
     assert!(desired.http_routes.is_empty());
     assert!(desired.services.is_empty());
     assert!(desired.envoy_backends.is_empty());
+}
+
+#[test]
+fn redirect_router_drops_backend_refs() {
+    // Gateway API CEL forbids combining a RequestRedirect filter with
+    // backendRefs. Pangolin emits exactly this shape for its
+    // `redirect-to-https` router, so the controller has to suppress the
+    // backendRef on the resulting rule or admission rejects the HTTPRoute.
+    let cfg = test_config();
+    let dyn_config: TraefikDynamicConfig = serde_json::from_value(json!({
+        "http": {
+            "routers": {
+                "plain-router": {
+                    "rule": "Host(`web.example.com`)",
+                    "service": "web-service",
+                    "entryPoints": ["websecure"]
+                },
+                "redirect-router": {
+                    "rule": "Host(`web.example.com`)",
+                    "service": "web-service",
+                    "entryPoints": ["web"],
+                    "middlewares": ["to-https"]
+                }
+            },
+            "services": {
+                "web-service": {
+                    "loadBalancer": { "servers": [{ "url": "http://10.0.0.7:8080" }] }
+                }
+            },
+            "middlewares": {
+                "to-https": { "redirectScheme": { "scheme": "https" } }
+            }
+        }
+    }))
+    .unwrap();
+    let desired = build_desired(&cfg, &dyn_config);
+
+    assert_eq!(desired.http_routes.len(), 2, "both routers should emit");
+
+    let plain = desired
+        .http_routes
+        .values()
+        .find(|r| r.metadata.name.as_deref().unwrap().contains("plain-router"))
+        .expect("plain router");
+    let redirect = desired
+        .http_routes
+        .values()
+        .find(|r| {
+            r.metadata
+                .name
+                .as_deref()
+                .unwrap()
+                .contains("redirect-router")
+        })
+        .expect("redirect router");
+
+    let plain_rule = &plain.spec.rules.as_ref().unwrap()[0];
+    let redirect_rule = &redirect.spec.rules.as_ref().unwrap()[0];
+
+    // Plain router proxies to backend → backendRefs present.
+    assert!(
+        plain_rule
+            .backend_refs
+            .as_ref()
+            .is_some_and(|refs| !refs.is_empty()),
+        "plain HTTPRoute must keep its backendRefs"
+    );
+    assert!(
+        plain_rule.filters.as_ref().is_none_or(Vec::is_empty),
+        "plain HTTPRoute should have no filters"
+    );
+
+    // Redirect router terminates → backendRefs must be absent.
+    assert!(
+        redirect_rule.backend_refs.is_none(),
+        "redirect HTTPRoute must NOT carry backendRefs (Gateway API CEL forbids it)"
+    );
+    let filters = redirect_rule
+        .filters
+        .as_ref()
+        .expect("redirect HTTPRoute must carry filters");
+    assert_eq!(filters.len(), 1);
+    assert!(filters[0].request_redirect.is_some());
 }

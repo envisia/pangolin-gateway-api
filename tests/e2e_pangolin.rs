@@ -100,9 +100,24 @@ where
     }
 }
 
+/// Initialize a tracing subscriber so the controller's `tracing::warn!` /
+/// `tracing::error!` lines (most importantly: SSA failures) reach the test
+/// stdout. Without this, an apply error inside `reconcile::run_loop` is
+/// silently swallowed and the test just times out with no clue why.
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let _ = fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,kube=info")),
+        )
+        .with_test_writer()
+        .try_init();
+}
+
 #[tokio::test]
 #[ignore = "requires a real cluster + provisioned pangolin; see .github/workflows/e2e.yml"]
 async fn controller_reconciles_real_pangolin() {
+    init_tracing();
     let endpoint =
         std::env::var("INTEGRATION_PANGOLIN_URL").expect("INTEGRATION_PANGOLIN_URL must be set");
     let namespace =
