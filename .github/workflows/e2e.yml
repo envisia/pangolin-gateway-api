@@ -1,0 +1,173 @@
+name: E2E (pangolin)
+
+# Full end-to-end smoke against a real pangolin instance:
+#   1. Start kind + install Gateway API experimental CRDs.
+#   2. Start fosrl/pangolin in a sidecar container.
+#   3. Run examples/pangolin_bootstrap to set the admin and create
+#      one org / site / HTTP resource / IP target via pangolin's REST API.
+#   4. Run the controller against pangolin's /api/v1/traefik-config and
+#      assert the right HTTPRoute / ListenerSet / Service / EndpointSlice
+#      objects land in the cluster.
+#
+# Same owner-only gating as the cluster integration workflow: triggers on
+# manual dispatch or on PRs that carry the `integration` label.
+on:
+  workflow_dispatch:
+    inputs:
+      kind_version:
+        description: kind release to use
+        required: false
+        default: v0.24.0
+      gateway_api_version:
+        description: Gateway API release (experimental channel)
+        required: false
+        default: v1.5.1
+      pangolin_image:
+        description: Pangolin image to test against
+        required: false
+        default: fosrl/pangolin:latest
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
+  KIND_VERSION: ${{ inputs.kind_version || 'v0.24.0' }}
+  GATEWAY_API_VERSION: ${{ inputs.gateway_api_version || 'v1.5.1' }}
+  PANGOLIN_IMAGE: ${{ inputs.pangolin_image || 'fosrl/pangolin:latest' }}
+  # Stable values referenced by both the bootstrap binary and the test.
+  PANGOLIN_SETUP_TOKEN: abcdef0123456789abcdef0123456789
+  PANGOLIN_ADMIN_EMAIL: admin@integration.local
+  PANGOLIN_ADMIN_PASSWORD: Password1!
+  PANGOLIN_EXTERNAL_URL: http://127.0.0.1:13000
+  PANGOLIN_INTERNAL_URL: http://127.0.0.1:13001
+  PANGOLIN_RESOURCE_HOST: web
+
+jobs:
+  e2e:
+    name: e2e (pangolin)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'integration'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          rustflags: -D warnings
+
+      - name: Cache cargo registry/target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: e2e
+
+      - name: Install kind
+        run: |
+          curl -fsSL -o kind \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+          kind version
+
+      - name: Create kind cluster
+        run: |
+          kind create cluster --name e2e --wait 90s
+          kubectl cluster-info
+
+      - name: Install Gateway API experimental CRDs
+        run: |
+          kubectl apply --server-side --force-conflicts -f \
+            "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/experimental-install.yaml"
+          for crd in \
+            httproutes.gateway.networking.k8s.io \
+            listenersets.gateway.networking.k8s.io \
+            gateways.gateway.networking.k8s.io; do
+            kubectl wait --for=condition=Established --timeout=60s "crd/$crd"
+          done
+
+      - name: Create controller namespace
+        run: kubectl create namespace pangolin-system
+
+      - name: Start pangolin container
+        run: |
+          # Copy the config into a directory we own so pangolin can write to it
+          # for migrations / logs.
+          mkdir -p pangolin-config
+          cp tests/fixtures/e2e/config.yml pangolin-config/config.yml
+          docker run -d --name pangolin-e2e \
+            -p 13000:3000 -p 13001:3001 \
+            -e "PANGOLIN_SETUP_TOKEN=${PANGOLIN_SETUP_TOKEN}" \
+            -v "$PWD/pangolin-config:/app/config" \
+            "${PANGOLIN_IMAGE}"
+          echo "Waiting for pangolin internal API (max 60s)..."
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null "${PANGOLIN_INTERNAL_URL}/api/v1/"; then
+              echo "pangolin up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "pangolin failed to come up. Logs:"
+          docker logs pangolin-e2e | tail -100
+          exit 1
+
+      - name: Build pangolin_bootstrap + tests
+        run: |
+          cargo build --locked --example pangolin_bootstrap
+          cargo test --locked --no-run --test e2e_pangolin
+
+      - name: Provision pangolin resources
+        run: target/debug/examples/pangolin_bootstrap
+
+      - name: Run e2e test against real pangolin
+        env:
+          INTEGRATION_PANGOLIN_URL: http://127.0.0.1:13001/api/v1/traefik-config
+          INTEGRATION_NAMESPACE: pangolin-system
+          INTEGRATION_PARENT_GATEWAY: eg
+          INTEGRATION_RESOURCE_HOST: web.integration.local
+          RUST_LOG: info,kube=info,pangolin_gateway_controller=debug
+        run: |
+          cargo test --locked --test e2e_pangolin -- \
+            --ignored --exact --nocapture --test-threads=1 \
+            controller_reconciles_real_pangolin
+
+      - name: Dump pangolin + cluster state on failure
+        if: failure()
+        run: |
+          echo "=== pangolin logs ==="
+          docker logs pangolin-e2e 2>&1 | tail -200 || true
+          echo "=== pangolin /api/v1/traefik-config ==="
+          curl -sS "${PANGOLIN_INTERNAL_URL}/api/v1/traefik-config" | head -c 4000 || true
+          echo
+          echo "=== cluster nodes ==="
+          kubectl get nodes -o wide || true
+          echo "=== pangolin-system contents ==="
+          kubectl -n pangolin-system get \
+            httproute,listenerset,service,endpointslice -o wide || true
+          echo "=== HTTPRoute describe ==="
+          kubectl -n pangolin-system describe httproute || true
+          echo "=== ListenerSet describe ==="
+          kubectl -n pangolin-system describe listenerset || true
+
+      - name: Stop pangolin
+        if: always()
+        run: docker rm -f pangolin-e2e 2>/dev/null || true
+
+      - name: Delete kind cluster
+        if: always()
+        run: kind delete cluster --name e2e || true
