@@ -195,7 +195,13 @@ fn read_args(chars: &[char], idx: &mut usize) -> Vec<String> {
             while *idx < chars.len() && chars[*idx] != ',' && chars[*idx] != ')' {
                 *idx += 1;
             }
-            args.push(chars[start..*idx].iter().collect::<String>().trim().to_string());
+            args.push(
+                chars[start..*idx]
+                    .iter()
+                    .collect::<String>()
+                    .trim()
+                    .to_string(),
+            );
         }
     }
     args

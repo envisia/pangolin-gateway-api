@@ -61,7 +61,10 @@ pub async fn run_loop(
                     raw_bytes,
                 } = *changed;
                 if last_digest.as_ref() == Some(&digest) {
-                    info!(bytes = raw_bytes, "pangolin: body unchanged (matched sha256)");
+                    info!(
+                        bytes = raw_bytes,
+                        "pangolin: body unchanged (matched sha256)"
+                    );
                 } else {
                     info!(
                         bytes = raw_bytes,
@@ -91,11 +94,7 @@ pub async fn run_loop(
     }
 }
 
-async fn reconcile_once(
-    cfg: &Config,
-    kube_client: &kube::Client,
-    desired: &Desired,
-) -> Result<()> {
+async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desired) -> Result<()> {
     let ns = cfg.namespace.as_str();
     let route_api: Api<HTTPRoute> = Api::namespaced(kube_client.clone(), ns);
     let ls_api: Api<ListenerSet> = Api::namespaced(kube_client.clone(), ns);

@@ -3,8 +3,9 @@
 //! a TLS secret template is configured.
 
 use gateway_api::apis::experimental::listenersets::{
-    ListenerSet, ListenerSetListeners, ListenerSetListenersTls, ListenerSetListenersTlsCertificateRefs,
-    ListenerSetListenersTlsMode, ListenerSetParentRef, ListenerSetSpec,
+    ListenerSet, ListenerSetListeners, ListenerSetListenersTls,
+    ListenerSetListenersTlsCertificateRefs, ListenerSetListenersTlsMode, ListenerSetParentRef,
+    ListenerSetSpec,
 };
 
 use crate::apply::{managed_metadata_with, owner_labels};

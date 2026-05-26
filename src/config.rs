@@ -61,9 +61,7 @@ impl Config {
             Url::parse(&endpoint_raw).context("CONFIG_ENDPOINT must be a valid URL")?;
 
         let tls_skip_verify = bool_env("CONFIG_TLS_SKIP_VERIFY", false)?;
-        if tls_skip_verify
-            && !bool_env("I_UNDERSTAND_CONFIG_TLS_SKIP_VERIFY_IS_INSECURE", false)?
-        {
+        if tls_skip_verify && !bool_env("I_UNDERSTAND_CONFIG_TLS_SKIP_VERIFY_IS_INSECURE", false)? {
             bail!(
                 "CONFIG_TLS_SKIP_VERIFY=true requires \
                  I_UNDERSTAND_CONFIG_TLS_SKIP_VERIFY_IS_INSECURE=true to be explicitly set"

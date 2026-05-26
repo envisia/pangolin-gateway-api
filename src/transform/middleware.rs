@@ -65,7 +65,10 @@ fn translate(router: &str, name: &str, mw: &Middleware) -> Option<HttpRouteRules
 
 fn translate_redirect_scheme(body: &Value) -> Option<HttpRouteRulesFilters> {
     let scheme = body.get("scheme")?.as_str()?;
-    let port = body.get("port").and_then(Value::as_str).and_then(|p| p.parse().ok());
+    let port = body
+        .get("port")
+        .and_then(Value::as_str)
+        .and_then(|p| p.parse().ok());
     let scheme_enum = match scheme {
         "http" => HttpRouteRulesFiltersRequestRedirectScheme::Http,
         "https" => HttpRouteRulesFiltersRequestRedirectScheme::Https,

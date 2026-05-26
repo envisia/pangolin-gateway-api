@@ -89,7 +89,11 @@ pub fn build_routes(
 
         let rules = vec![HttpRouteRules {
             matches,
-            filters: if filters.is_empty() { None } else { Some(filters) },
+            filters: if filters.is_empty() {
+                None
+            } else {
+                Some(filters)
+            },
             backend_refs: Some(backend_refs),
             ..Default::default()
         }];
@@ -114,12 +118,7 @@ pub fn build_routes(
         };
 
         let route = HTTPRoute {
-            metadata: managed_metadata_with(
-                cfg,
-                &route_name,
-                labels,
-                &cfg.httproute_annotations,
-            ),
+            metadata: managed_metadata_with(cfg, &route_name, labels, &cfg.httproute_annotations),
             spec,
             status: None,
         };

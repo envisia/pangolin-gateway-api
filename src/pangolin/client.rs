@@ -37,7 +37,10 @@ impl Client {
         let mut builder = reqwest::Client::builder()
             .timeout(cfg.fetch_timeout)
             .connect_timeout(Duration::from_secs(10))
-            .user_agent(format!("pangolin-envoy-controller/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!(
+                "pangolin-envoy-controller/{}",
+                env!("CARGO_PKG_VERSION")
+            ))
             .pool_idle_timeout(Some(Duration::from_secs(90)));
 
         if cfg.tls_skip_verify {
@@ -45,10 +48,10 @@ impl Client {
             builder = builder.danger_accept_invalid_certs(true);
         }
         if let Some(path) = &cfg.ca_file {
-            let pem = std::fs::read(path)
-                .with_context(|| format!("reading CONFIG_CA_FILE {path:?}"))?;
-            let cert = reqwest::Certificate::from_pem(&pem)
-                .context("parsing CONFIG_CA_FILE as PEM")?;
+            let pem =
+                std::fs::read(path).with_context(|| format!("reading CONFIG_CA_FILE {path:?}"))?;
+            let cert =
+                reqwest::Certificate::from_pem(&pem).context("parsing CONFIG_CA_FILE as PEM")?;
             builder = builder.add_root_certificate(cert);
         }
 
@@ -102,7 +105,10 @@ impl Client {
             );
         }
 
-        let raw = resp.bytes().await.context("reading pangolin response body")?;
+        let raw = resp
+            .bytes()
+            .await
+            .context("reading pangolin response body")?;
         if raw.len() as u64 > self.max_body_bytes {
             bail!(
                 "pangolin response is {} bytes, exceeds CONFIG_MAX_RESPONSE_BODY_BYTES={}",

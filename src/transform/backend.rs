@@ -288,12 +288,11 @@ mod tests {
 
     #[test]
     fn classifies_cluster_dns_full() {
-        match classify(
-            "svc",
-            &[s("http://echo.foo.svc.cluster.local:80")],
-        ) {
+        match classify("svc", &[s("http://echo.foo.svc.cluster.local:80")]) {
             Classification::ClusterDns {
-                service, namespace, port,
+                service,
+                namespace,
+                port,
             } => {
                 assert_eq!(service, "echo");
                 assert_eq!(namespace, "foo");

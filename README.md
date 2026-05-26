@@ -1,5 +1,9 @@
 # pangolin-envoy-controller
 
+[![CI](https://github.com/envisia/pangolin-gateway-api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/envisia/pangolin-gateway-api/actions/workflows/ci.yml)
+[![Docker](https://github.com/envisia/pangolin-gateway-api/actions/workflows/docker.yml/badge.svg?branch=main)](https://github.com/envisia/pangolin-gateway-api/actions/workflows/docker.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 A small Kubernetes controller, written in Rust with [kube-rs], that reconciles
 [Pangolin]'s Traefik dynamic-config output into [Gateway API] objects for
 [Envoy Gateway]. It is the same idea as the upstream [pangolin-kube-controller]

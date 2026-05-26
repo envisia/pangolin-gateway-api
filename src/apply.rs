@@ -53,22 +53,14 @@ pub fn managed_metadata_with(
 }
 
 /// `ObjectMeta` populated with the controller's labels and only the managed annotation.
-pub fn managed_metadata(
-    cfg: &Config,
-    name: &str,
-    labels: BTreeMap<String, String>,
-) -> ObjectMeta {
+pub fn managed_metadata(cfg: &Config, name: &str, labels: BTreeMap<String, String>) -> ObjectMeta {
     managed_metadata_with(cfg, name, labels, &BTreeMap::new())
 }
 
 /// Apply a single object via Server-Side Apply. `T` must be a namespaced Kubernetes
 /// resource whose `DynamicType` is `()` — true for built-ins and for kube_derive-generated
 /// CustomResources.
-pub async fn ssa_apply<T>(
-    api: &Api<T>,
-    cfg: &Config,
-    obj: &T,
-) -> Result<()>
+pub async fn ssa_apply<T>(api: &Api<T>, cfg: &Config, obj: &T) -> Result<()>
 where
     T: Resource<DynamicType = ()> + Clone + Serialize + DeserializeOwned + std::fmt::Debug,
 {
@@ -90,12 +82,7 @@ where
             debug!(kind = %T::kind(&()), name = %name, "applied");
             Ok(())
         }
-        Err(e) => Err(e).with_context(|| {
-            format!(
-                "applying {kind}/{name}",
-                kind = T::kind(&()),
-                name = name
-            )
-        }),
+        Err(e) => Err(e)
+            .with_context(|| format!("applying {kind}/{name}", kind = T::kind(&()), name = name)),
     }
 }

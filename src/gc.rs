@@ -12,11 +12,7 @@ use tracing::{info, warn};
 
 use crate::config::Config;
 
-pub async fn sweep<T>(
-    api: &Api<T>,
-    cfg: &Config,
-    desired_names: &BTreeSet<String>,
-) -> Result<()>
+pub async fn sweep<T>(api: &Api<T>, cfg: &Config, desired_names: &BTreeSet<String>) -> Result<()>
 where
     T: Resource<DynamicType = ()> + Clone + Serialize + DeserializeOwned + std::fmt::Debug,
 {
