@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use gateway_api::apis::experimental::httproutes::{
     HTTPRoute, HttpRouteParentRefs, HttpRouteRules, HttpRouteRulesBackendRefs,
-    HttpRouteRulesMatches, HttpRouteRulesMatchesPath, HttpRouteRulesMatchesPathType, HttpRouteSpec,
+    HttpRouteRulesFiltersType, HttpRouteRulesMatches, HttpRouteRulesMatchesPath,
+    HttpRouteRulesMatchesPathType, HttpRouteSpec,
 };
 use tracing::warn;
 
@@ -77,16 +78,26 @@ pub fn build_routes(
             }]
         });
 
-        let backend_refs = vec![HttpRouteRulesBackendRefs {
-            name: backend.name.clone(),
-            namespace: backend.namespace.clone(),
-            port: Some(backend.port),
-            kind: Some(backend.kind.clone()),
-            // Empty group = core API. Non-empty for the Envoy Gateway Backend CRD.
-            group: Some(backend.group.clone()),
-            weight: Some(1),
-            ..Default::default()
-        }];
+        // Gateway API CEL: "RequestRedirect filter must not be used together with
+        // backendRefs". When the router carries a redirect middleware (e.g.
+        // pangolin's `redirect-to-https`), the rule is terminating — emitting
+        // backendRefs alongside would make admission reject the entire HTTPRoute.
+        let is_terminating = filters
+            .iter()
+            .any(|f| f.r#type == HttpRouteRulesFiltersType::RequestRedirect);
+
+        let backend_refs = (!is_terminating).then(|| {
+            vec![HttpRouteRulesBackendRefs {
+                name: backend.name.clone(),
+                namespace: backend.namespace.clone(),
+                port: Some(backend.port),
+                kind: Some(backend.kind.clone()),
+                // Empty group = core API. Non-empty for the Envoy Gateway Backend CRD.
+                group: Some(backend.group.clone()),
+                weight: Some(1),
+                ..Default::default()
+            }]
+        });
 
         let rules = vec![HttpRouteRules {
             matches,
@@ -95,7 +106,7 @@ pub fn build_routes(
             } else {
                 Some(filters)
             },
-            backend_refs: Some(backend_refs),
+            backend_refs,
             ..Default::default()
         }];
 

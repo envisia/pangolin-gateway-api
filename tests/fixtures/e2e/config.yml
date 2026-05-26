@@ -1,0 +1,32 @@
+# Minimal pangolin config for the e2e workflow. Mounted into the pangolin
+# container at /app/config/config.yml. Mirrors the structure of the installer
+# template (pangolin/install/config/config.yml) but with insecure-by-design
+# values that only make sense inside an ephemeral CI cluster.
+gerbil:
+    start_port: 51820
+    base_endpoint: "integration.local"
+
+app:
+    dashboard_url: "http://localhost:3002"
+    log_level: "info"
+    telemetry:
+        anonymous_usage: false
+
+domains:
+    domain1:
+        base_domain: "integration.local"
+
+server:
+    secret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    cors:
+        origins: ["http://localhost:3002"]
+        methods: ["GET", "POST", "PUT", "DELETE", "PATCH"]
+        allowed_headers: ["X-CSRF-Token", "Content-Type"]
+        credentials: false
+    secure_cookies: false
+
+flags:
+    require_email_verification: false
+    disable_signup_without_invite: false
+    disable_user_create_org: false
+    allow_raw_resources: true
