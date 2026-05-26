@@ -1,3 +1,6 @@
 [submodule "pangolin"]
 	path = pangolin
 	url = https://github.com/fosrl/pangolin
+[submodule "pangolin-kube-controller"]
+	path = pangolin-kube-controller
+	url = https://github.com/fosrl/pangolin-kube-controller
