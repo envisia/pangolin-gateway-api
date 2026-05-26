@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/envisia/pangolin-gateway-api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/envisia/pangolin-gateway-api/actions/workflows/ci.yml)
 [![Docker](https://github.com/envisia/pangolin-gateway-api/actions/workflows/docker.yml/badge.svg?branch=main)](https://github.com/envisia/pangolin-gateway-api/actions/workflows/docker.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](#license)
 
 A small Kubernetes controller, written in Rust with [kube-rs], that reconciles
 [Pangolin]'s Traefik dynamic-config output into [Gateway API] objects for
@@ -202,18 +202,39 @@ from the upstream pangolin-kube-controller test corpus.
 
 ## License
 
-Licensed under either of
+This project was AI-generated using the Go reference implementation
+[pangolin-kube-controller] as the architectural model. Because that upstream is
+licensed under the [GNU Affero General Public License v3.0][AGPL-3.0], and the
+design and behaviour of this controller (polling model, managed-label GC,
+SSA apply strategy, fixture corpus) was derived from it, the combined work
+must be distributed under the AGPL-3.0:
+
+* GNU Affero General Public License v3.0 ([LICENSE-AGPL](LICENSE-AGPL) or
+  <https://www.gnu.org/licenses/agpl-3.0.html>)
+
+Separately, the *new* code contributed in this repository — i.e. the
+Rust implementation itself, exclusive of any patterns inherited from
+[pangolin-kube-controller] — is *additionally* offered by its authors under
+either of:
 
 * Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
   <http://www.apache.org/licenses/LICENSE-2.0>)
 * MIT license ([LICENSE-MIT](LICENSE-MIT) or
   <https://opensource.org/licenses/MIT>)
 
-at your option.
+at your option, so that those original portions may be reused outside the
+context of this combined work. The dual MIT/Apache-2.0 grant does **not**
+extend to any portion derived from [pangolin-kube-controller] or any other
+AGPL-3.0 code — if you cannot satisfy the AGPL-3.0, you cannot redistribute
+this repository as a whole.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this work by you, as defined in the Apache-2.0 license, shall
-be dual licensed as above, without any additional terms or conditions.
+be licensed under AGPL-3.0 for the combined work and additionally available
+under MIT or Apache-2.0 for the original portions, as above, without any
+additional terms or conditions.
+
+[AGPL-3.0]: https://www.gnu.org/licenses/agpl-3.0.html
 
 ## Acknowledgements
 

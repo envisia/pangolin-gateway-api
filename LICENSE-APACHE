@@ -1,3 +1,20 @@
+NOTICE
+======
+
+This repository is a combined work derived from
+https://github.com/fosrl/pangolin-kube-controller, which is licensed under the
+GNU Affero General Public License v3.0 (see LICENSE-AGPL). As a derivative,
+the repository as a whole must be redistributed under AGPL-3.0.
+
+The Apache License 2.0 below is offered by the authors **only** for the
+original, AI-generated Rust code contributed in this repository — i.e.
+portions that are not derived from pangolin-kube-controller or any other
+AGPL-3.0 work — so that those portions may be reused outside this combined
+work. It does not, and cannot, relicense any AGPL-3.0-derived portion under
+Apache-2.0.
+
+----
+
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
