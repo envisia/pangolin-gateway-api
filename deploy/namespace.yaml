@@ -3,4 +3,4 @@ kind: Namespace
 metadata:
   name: pangolin-system
   labels:
-    app.kubernetes.io/name: pangolin-envoy-controller
+    app.kubernetes.io/name: pangolin-gateway-controller

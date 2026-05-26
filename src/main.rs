@@ -6,6 +6,7 @@ use tracing::{error, info};
 
 mod apply;
 mod config;
+mod envoy_gateway;
 mod gc;
 mod pangolin;
 mod reconcile;
@@ -26,7 +27,7 @@ async fn main() -> ExitCode {
         endpoint = %cfg.pangolin_endpoint,
         namespace = %cfg.namespace,
         gateway = %cfg.parent_gateway,
-        "starting pangolin-envoy-controller"
+        "starting pangolin-gateway-controller"
     );
 
     let shutdown = tokio_util::sync::CancellationToken::new();

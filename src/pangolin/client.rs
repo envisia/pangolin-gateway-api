@@ -38,7 +38,7 @@ impl Client {
             .timeout(cfg.fetch_timeout)
             .connect_timeout(Duration::from_secs(10))
             .user_agent(format!(
-                "pangolin-envoy-controller/{}",
+                "pangolin-gateway-controller/{}",
                 env!("CARGO_PKG_VERSION")
             ))
             .pool_idle_timeout(Some(Duration::from_secs(90)));

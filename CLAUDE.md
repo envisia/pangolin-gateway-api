@@ -70,7 +70,7 @@ TraefikDynamicConfig (src/pangolin/types.rs)
         │ transform pipeline
         ▼
 Desired { http_routes, listener_sets, services, endpoint_slices }
-        │ Server-Side Apply with field_manager = pangolin-envoy-controller
+        │ Server-Side Apply with field_manager = pangolin-gateway-controller
         ▼
 Cluster state
         │ sweep: list by managed-by label, delete anything not in Desired
@@ -95,11 +95,20 @@ selector and deletes names not present in the corresponding desired map.
     `Path(...)`, `PathRegexp(...)` are usable. Anything else (`||`, `!`,
     `HostRegexp`, `Method`, `Headers`, `Query`) marks the router as unusable and
     it's logged + skipped — never silently misrouted.
-  - `backend.rs` — three-way classifier:
-    1. IP literal → headless `Service` + `EndpointSlice` synthesized.
-    2. `<svc>.<ns>.svc[.cluster.local]` → direct cross-ns `backendRef`, no
-       synthesis.
-    3. Anything else → logged and skipped.
+  - `backend.rs` — four-way classifier, dispatched on `CONFIG_BACKEND_KIND`:
+    1. IP literal → service mode synthesizes headless `Service` +
+       `EndpointSlice`; envoy-backend mode emits an `gateway.envoyproxy.io`
+       `Backend` with `endpoints[].ip`.
+    2. `<svc>.<ns>.svc[.cluster.local]` → direct cross-ns `backendRef` in
+       **both** modes. The real Service already exists; don't duplicate it.
+    3. Bare FQDN (e.g. `api.example.com`) → service mode logs and skips
+       (EndpointSlice can't carry hostnames); envoy-backend mode emits a
+       `Backend` with `endpoints[].fqdn`.
+    4. Anything else → logged and skipped.
+
+    The dispatch is the only place that knows about `BackendKind`. Don't leak
+    that enum into `route.rs` — the route builder reads
+    `ResolvedBackend { group, kind, name, namespace, port }` and is mode-agnostic.
   - `middleware.rs` — small allow-list mapping `redirectScheme`, `headers`,
     `addPrefix`, `replacePath`, `stripPrefix` to Gateway API filters.
     `replacePathRegex` and pangolin's `badger` plugin are intentionally skipped.
@@ -113,10 +122,15 @@ selector and deletes names not present in the corresponding desired map.
 - `src/apply.rs` — `managed_metadata{,_with}` builders plus the SSA helper.
   Every applied object gets the managed/instance labels and managed annotation;
   HTTPRoute and ListenerSet additionally get any user-configured annotations.
+- `src/envoy_gateway.rs` — hand-rolled bindings for Envoy Gateway's
+  `Backend` CRD (`gateway.envoyproxy.io/v1alpha1`). The `gateway-api` crate
+  doesn't ship these. Add new Envoy Gateway-specific CRDs here too.
 - `src/gc.rs` — generic sweep over `Api<T>` by the managed-by selector.
 - `src/reconcile.rs` — outer loop: fetch → if changed transform+apply+gc → wait.
-  Apply order is `Service → EndpointSlice → ListenerSet → HTTPRoute`. GC happens
-  after every successful apply round.
+  Apply order is `Service → EndpointSlice → Backend → ListenerSet → HTTPRoute`.
+  GC happens after every successful apply round. The `Backend` sweep is gated
+  on `cfg.backend_kind == EnvoyBackend` — the CRD may not even be installed
+  when the controller runs in plain Gateway API mode, so we don't list it.
 
 ## Configurable annotation hook
 
@@ -143,7 +157,7 @@ certs for backend stubs.
 ```sh
 cargo test
 cargo build --release
-docker build -t pangolin-envoy-controller:dev .
+docker build -t pangolin-gateway-controller:dev .
 kubectl apply -k deploy/
 ```
 
@@ -158,7 +172,7 @@ controller code.
   unsupported predicates, exotic backends) is `tracing::warn!`ed and dropped at
   the affected router/service level. Don't pretend partial config worked.
 - **Idempotent applies.** Every write goes through SSA with
-  `field_manager = pangolin-envoy-controller` (configurable via
+  `field_manager = pangolin-gateway-controller` (configurable via
   `CONFIG_FIELD_MANAGER`). Never use update-with-resourceVersion.
 - **GC by label, not owner reference.** Pangolin objects are spread across
   kinds; we don't have a single root to attach `ownerReferences` to. The

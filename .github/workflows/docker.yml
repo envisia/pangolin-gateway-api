@@ -91,7 +91,7 @@ jobs:
           provenance: mode=max
           # Pre-compute the manifest digest so cosign signs the index, not the
           # platform-specific manifests.
-          outputs: type=image,name=target,annotation-index.org.opencontainers.image.description=pangolin-envoy-controller
+          outputs: type=image,name=target,annotation-index.org.opencontainers.image.description=pangolin-gateway-controller
 
       - name: Cosign sign image (keyless)
         if: github.event_name != 'pull_request'

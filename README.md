@@ -1,4 +1,4 @@
-# pangolin-envoy-controller
+# pangolin-gateway-controller
 
 [![CI](https://github.com/envisia/pangolin-gateway-api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/envisia/pangolin-gateway-api/actions/workflows/ci.yml)
 [![Docker](https://github.com/envisia/pangolin-gateway-api/actions/workflows/docker.yml/badge.svg?branch=main)](https://github.com/envisia/pangolin-gateway-api/actions/workflows/docker.yml)
@@ -20,7 +20,7 @@ Envoy Gateway can serve every tunneled resource pangolin manages.
                                    │  poll + ETag
                                    ▼
        ┌──────────────────────────────────────────────────┐
-       │  pangolin-envoy-controller                       │
+       │  pangolin-gateway-controller                       │
        │  – decode Traefik dynamic config                 │
        │  – translate routers/services/middlewares        │
        │  – Server-Side Apply with field manager          │
@@ -48,8 +48,9 @@ applies the additions/updates with [Server-Side Apply], and deletes orphans.
 | `http.routers[*].rule = Host(…)`         | `HTTPRoute.spec.hostnames` + a Listener per unique host on the ListenerSet |
 | `http.routers[*].rule = PathPrefix(`/x`)`| `HTTPRouteRulesMatchesPath{type=PathPrefix,value="/x"}`                    |
 | `http.routers[*].rule = Path(`/x`)`      | `HTTPRouteRulesMatchesPath{type=Exact,value="/x"}`                         |
-| `http.services[*].loadBalancer` (IP)     | Headless `Service` + `EndpointSlice` with the IPs                          |
-| `http.services[*].loadBalancer` (cluster DNS `<svc>.<ns>.svc[.cluster.local]`) | direct backendRef to the existing Service     |
+| `http.services[*].loadBalancer` (IP)     | _service mode (default):_ headless `Service` + `EndpointSlice` with the IPs.<br>_envoy-backend mode:_ one `gateway.envoyproxy.io/v1alpha1 Backend` with `endpoints[].ip`. |
+| `http.services[*].loadBalancer` (cluster DNS `<svc>.<ns>.svc[.cluster.local]`) | direct backendRef to the existing Service (both modes)            |
+| `http.services[*].loadBalancer` (other FQDN, e.g. `api.example.com`) | _service mode:_ logged and dropped (EndpointSlice can't carry hostnames).<br>_envoy-backend mode:_ `Backend.spec.endpoints[].fqdn`. |
 | `middlewares.redirectScheme`             | HTTPRoute filter `RequestRedirect{scheme}`                                 |
 | `middlewares.headers.customRequestHeaders` | HTTPRoute filter `RequestHeaderModifier{set}`                            |
 | `middlewares.headers.customResponseHeaders` | HTTPRoute filter `ResponseHeaderModifier{set}`                          |
@@ -62,6 +63,23 @@ applies the additions/updates with [Server-Side Apply], and deletes orphans.
 Unsupported rule constructs (`||` disjunction, `!` negation, `HostRegexp`,
 `Method`, `Headers`, …) cause the affected router to be **logged and skipped**
 rather than silently misrouted.
+
+## Backend strategy
+
+`CONFIG_BACKEND_KIND` selects how pangolin's IP/FQDN backends are represented
+in the cluster:
+
+| Value                | Emits                                                          | Portable? | Supports FQDN? |
+|----------------------|----------------------------------------------------------------|-----------|----------------|
+| `service` _(default)_| headless `Service` + `EndpointSlice` per pangolin service      | yes       | no             |
+| `envoy-backend`      | `gateway.envoyproxy.io/v1alpha1 Backend` per pangolin service  | **Envoy Gateway only** | yes  |
+
+In either mode, pangolin URLs that point at a Kubernetes cluster Service
+(`<name>.<namespace>.svc[.cluster.local][:port]`) are passed through as a
+direct `Service` `backendRef` — the controller does not synthesize a duplicate.
+
+Pick the default unless you specifically want FQDN backends or the `Backend`
+CRD's other features (health checking via `BackendTrafficPolicy`, etc.).
 
 ## Certificate handling with cert-manager
 
@@ -160,11 +178,12 @@ upstream Go controller (`CONFIG_*`) where the concepts overlap.
 | `CONFIG_ENABLE_HTTPS_LISTENERS`    | `true`                                      | Add an HTTPS listener per host when TLS is configured                       |
 | `CONFIG_TLS_SECRET_TEMPLATE`       | _(unset)_                                   | Template for cert secret name. `{hostname}` and `{hostname-dashed}` placeholders. When unset, no HTTPS listener is created. |
 | `CONFIG_TLS_SECRET_NAMESPACE`      | controller namespace                        | Namespace where TLS Secrets live                                            |
+| `CONFIG_BACKEND_KIND`              | `service`                                   | `service` (default) or `envoy-backend`. See [Backend strategy](#backend-strategy) |
 | `CONFIG_HTTPROUTE_ANNOTATIONS`     | _(unset)_                                   | `k=v,k=v` annotations stamped on every HTTPRoute. Typical: `cert-manager.io/cluster-issuer=letsencrypt-prod` |
 | `CONFIG_LISTENERSET_ANNOTATIONS`   | _(unset)_                                   | `k=v,k=v` annotations stamped on the ListenerSet                            |
-| `CONFIG_FIELD_MANAGER`             | `pangolin-envoy-controller`                 | Server-Side Apply field manager                                             |
+| `CONFIG_FIELD_MANAGER`             | `pangolin-gateway-controller`                 | Server-Side Apply field manager                                             |
 | `CONFIG_MANAGED_LABEL_KEY`         | `app.kubernetes.io/managed-by`              | Used for GC selector                                                        |
-| `CONFIG_MANAGED_LABEL_VALUE`       | `pangolin-envoy-controller`                 | Used for GC selector                                                        |
+| `CONFIG_MANAGED_LABEL_VALUE`       | `pangolin-gateway-controller`                 | Used for GC selector                                                        |
 | `CONFIG_INSTANCE_LABEL_KEY`        | `pangolin.envisia.de/instance`              | Lets multiple controller instances coexist without trampling each other     |
 | `CONFIG_INSTANCE_LABEL_VALUE`      | `default`                                   |                                                                             |
 | `CONFIG_READ_ONLY`                 | `false`                                     | Dry-run: log what would happen, do not call apply/delete                    |
@@ -175,7 +194,7 @@ upstream Go controller (`CONFIG_*`) where the concepts overlap.
 ```sh
 cargo test                  # unit + fixture tests
 cargo run                   # needs CONFIG_ENDPOINT, CONFIG_PARENT_GATEWAY, kubeconfig
-docker build -t pangolin-envoy-controller:dev .
+docker build -t pangolin-gateway-controller:dev .
 ```
 
 Fixtures under `tests/fixtures/` are real pangolin Traefik provider responses

@@ -78,11 +78,12 @@ pub fn build_routes(
         });
 
         let backend_refs = vec![HttpRouteRulesBackendRefs {
-            name: backend.service_name.clone(),
-            namespace: backend.service_namespace.clone(),
+            name: backend.name.clone(),
+            namespace: backend.namespace.clone(),
             port: Some(backend.port),
-            kind: Some("Service".into()),
-            group: Some(String::new()), // "" = core API group
+            kind: Some(backend.kind.clone()),
+            // Empty group = core API. Non-empty for the Envoy Gateway Backend CRD.
+            group: Some(backend.group.clone()),
             weight: Some(1),
             ..Default::default()
         }];

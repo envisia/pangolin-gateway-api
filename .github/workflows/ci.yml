@@ -44,7 +44,7 @@ jobs:
         run: cargo test --locked --all-features
 
       - name: cargo build (release)
-        run: cargo build --locked --release --bin pangolin-envoy-controller
+        run: cargo build --locked --release --bin pangolin-gateway-controller
 
   lint:
     name: lint

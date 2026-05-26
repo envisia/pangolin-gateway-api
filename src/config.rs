@@ -27,6 +27,10 @@ pub struct Config {
     pub http_port: i32,
     pub https_port: i32,
     pub enable_https_listeners: bool,
+
+    /// Which Kubernetes object kind backs an HTTPRoute's IP/FQDN targets.
+    pub backend_kind: BackendKind,
+
     /// Optional template for the TLS secret name per hostname. Supports the placeholders
     /// `{hostname}` (dots kept) and `{hostname-dashed}` (dots → dashes).
     /// When `None`, listeners are plain HTTP only.
@@ -52,6 +56,33 @@ pub struct Config {
 
     pub read_only: bool,
     pub log_traefik_config: bool,
+}
+
+/// Backend object kind used for IP / FQDN pangolin targets.
+///
+/// Cluster-DNS pass-through (`<svc>.<ns>.svc[.cluster.local]`) is independent of
+/// this setting — it always resolves to a direct `Service` `backendRef` because
+/// the Service already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    /// Synthesize a headless `Service` plus an `EndpointSlice` (IPv4 only).
+    /// Portable across every Gateway API implementation.
+    Service,
+    /// Emit a `gateway.envoyproxy.io/v1alpha1` `Backend` CRD. Envoy Gateway only,
+    /// but unlocks FQDN targets as well as IPs.
+    EnvoyBackend,
+}
+
+impl BackendKind {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "service" | "service-endpointslice" | "" => Ok(BackendKind::Service),
+            "envoy-backend" | "envoybackend" | "backend" => Ok(BackendKind::EnvoyBackend),
+            other => bail!(
+                "invalid CONFIG_BACKEND_KIND {other:?}; expected `service` or `envoy-backend`"
+            ),
+        }
+    }
 }
 
 impl Config {
@@ -95,15 +126,19 @@ impl Config {
             http_port: i32_env("CONFIG_HTTP_PORT", 80)?,
             https_port: i32_env("CONFIG_HTTPS_PORT", 443)?,
             enable_https_listeners: bool_env("CONFIG_ENABLE_HTTPS_LISTENERS", true)?,
+            backend_kind: match optional_env("CONFIG_BACKEND_KIND") {
+                Some(raw) => BackendKind::parse(&raw)?,
+                None => BackendKind::Service,
+            },
             tls_secret_template: optional_env("CONFIG_TLS_SECRET_TEMPLATE"),
             tls_secret_namespace: optional_env("CONFIG_TLS_SECRET_NAMESPACE"),
 
             field_manager: optional_env("CONFIG_FIELD_MANAGER")
-                .unwrap_or_else(|| "pangolin-envoy-controller".into()),
+                .unwrap_or_else(|| "pangolin-gateway-controller".into()),
             managed_label_key: optional_env("CONFIG_MANAGED_LABEL_KEY")
                 .unwrap_or_else(|| "app.kubernetes.io/managed-by".into()),
             managed_label_value: optional_env("CONFIG_MANAGED_LABEL_VALUE")
-                .unwrap_or_else(|| "pangolin-envoy-controller".into()),
+                .unwrap_or_else(|| "pangolin-gateway-controller".into()),
             instance_label_key: optional_env("CONFIG_INSTANCE_LABEL_KEY")
                 .unwrap_or_else(|| "pangolin.envisia.de/instance".into()),
             instance_label_value: optional_env("CONFIG_INSTANCE_LABEL_VALUE")
@@ -111,7 +146,7 @@ impl Config {
             managed_annotation_key: optional_env("CONFIG_MANAGED_ANNOTATION_KEY")
                 .unwrap_or_else(|| "pangolin.envisia.de/source".into()),
             managed_annotation_value: optional_env("CONFIG_MANAGED_ANNOTATION_VALUE")
-                .unwrap_or_else(|| "pangolin-envoy-controller".into()),
+                .unwrap_or_else(|| "pangolin-gateway-controller".into()),
 
             httproute_annotations: parse_kv_env("CONFIG_HTTPROUTE_ANNOTATIONS")?,
             listenerset_annotations: parse_kv_env("CONFIG_LISTENERSET_ANNOTATIONS")?,

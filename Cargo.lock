@@ -1258,7 +1258,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pangolin-envoy-controller"
+name = "pangolin-gateway-controller"
 version = "0.1.0"
 dependencies = [
  "anyhow",

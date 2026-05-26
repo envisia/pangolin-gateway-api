@@ -13,7 +13,10 @@ use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use tracing::warn;
 
+#[cfg(test)]
+use crate::config::BackendKind;
 use crate::config::Config;
+use crate::envoy_gateway::Backend;
 use crate::pangolin::TraefikDynamicConfig;
 use gateway_api::apis::experimental::httproutes::HTTPRoute;
 use gateway_api::apis::experimental::listenersets::ListenerSet;
@@ -26,6 +29,8 @@ pub struct Desired {
     pub listener_sets: BTreeMap<String, ListenerSet>,
     pub services: BTreeMap<String, Service>,
     pub endpoint_slices: BTreeMap<String, EndpointSlice>,
+    /// Populated only when `CONFIG_BACKEND_KIND=envoy-backend`. Empty otherwise.
+    pub envoy_backends: BTreeMap<String, Backend>,
 }
 
 pub fn build_desired(cfg: &Config, dyn_config: &TraefikDynamicConfig) -> Desired {
@@ -73,15 +78,16 @@ mod e2e_tests {
             http_port: 80,
             https_port: 443,
             enable_https_listeners: true,
+            backend_kind: BackendKind::Service,
             tls_secret_template: Some("{hostname-dashed}-tls".into()),
             tls_secret_namespace: None,
-            field_manager: "pangolin-envoy-controller".into(),
+            field_manager: "pangolin-gateway-controller".into(),
             managed_label_key: "app.kubernetes.io/managed-by".into(),
-            managed_label_value: "pangolin-envoy-controller".into(),
+            managed_label_value: "pangolin-gateway-controller".into(),
             instance_label_key: "pangolin.envisia.de/instance".into(),
             instance_label_value: "default".into(),
             managed_annotation_key: "pangolin.envisia.de/source".into(),
-            managed_annotation_value: "pangolin-envoy-controller".into(),
+            managed_annotation_value: "pangolin-gateway-controller".into(),
             httproute_annotations: std::collections::BTreeMap::new(),
             listenerset_annotations: std::collections::BTreeMap::new(),
             read_only: false,
@@ -143,6 +149,155 @@ mod e2e_tests {
                 "HTTPRoute does not reference configured listener set"
             );
         }
+    }
+
+    #[test]
+    fn envoy_backend_mode_emits_backend_crds() {
+        let mut cfg = test_config();
+        cfg.backend_kind = BackendKind::EnvoyBackend;
+        let dyn_config = load_fixture("pangolin-traefik-v3.5.0-older.json");
+        let desired = build_desired(&cfg, &dyn_config);
+
+        // In envoy-backend mode, the IP-backed pangolin services that would have
+        // become Service+EndpointSlice in service mode become Backend CRDs instead.
+        // The fixtures from upstream only use cluster-DNS targets, so no Backends
+        // are emitted — but more importantly, no Services/EndpointSlices are
+        // synthesized for them either.
+        assert!(
+            desired.services.is_empty(),
+            "envoy-backend mode must not synthesize Services"
+        );
+        assert!(
+            desired.endpoint_slices.is_empty(),
+            "envoy-backend mode must not synthesize EndpointSlices"
+        );
+
+        // Cluster-DNS pass-through still produces real Service backendRefs:
+        for route in desired.http_routes.values() {
+            let rules = route.spec.rules.as_ref().unwrap();
+            for rule in rules {
+                for r in rule.backend_refs.as_ref().unwrap() {
+                    // For these fixtures everything resolves to cluster Services.
+                    assert_eq!(r.kind.as_deref(), Some("Service"));
+                    assert_eq!(r.group.as_deref(), Some(""));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn envoy_backend_mode_on_ip_fixture() {
+        use serde_json::json;
+        // Hand-build a minimal pangolin response where the service has both IP
+        // and FQDN endpoints — service mode would drop the FQDN, but
+        // envoy-backend mode keeps it. IP wins for classification (single kind
+        // per pangolin service), so we exercise the two cases in separate
+        // fixtures.
+        let mut cfg = test_config();
+        cfg.backend_kind = BackendKind::EnvoyBackend;
+
+        let ip_only_json = json!({
+            "http": {
+                "routers": {
+                    "r1": {
+                        "rule": "Host(`api.example.com`)",
+                        "service": "s1",
+                    }
+                },
+                "services": {
+                    "s1": {
+                        "loadBalancer": {
+                            "servers": [{"url": "http://10.0.0.7:8080"}]
+                        }
+                    }
+                }
+            }
+        });
+        let dyn_config: TraefikDynamicConfig = serde_json::from_value(ip_only_json).unwrap();
+        let desired = build_desired(&cfg, &dyn_config);
+
+        assert!(desired.services.is_empty());
+        assert!(desired.endpoint_slices.is_empty());
+        assert_eq!(desired.envoy_backends.len(), 1);
+
+        let be = desired.envoy_backends.values().next().unwrap();
+        let ep = &be.spec.endpoints[0];
+        assert_eq!(ep.ip.as_ref().unwrap().address, "10.0.0.7");
+        assert_eq!(ep.ip.as_ref().unwrap().port, 8080);
+        assert!(ep.fqdn.is_none());
+
+        // HTTPRoute backendRef points at the Envoy Backend CRD.
+        let route = desired.http_routes.values().next().unwrap();
+        let backend_ref = &route.spec.rules.as_ref().unwrap()[0]
+            .backend_refs
+            .as_ref()
+            .unwrap()[0];
+        assert_eq!(backend_ref.group.as_deref(), Some("gateway.envoyproxy.io"));
+        assert_eq!(backend_ref.kind.as_deref(), Some("Backend"));
+    }
+
+    #[test]
+    fn envoy_backend_mode_emits_fqdn_endpoint() {
+        use serde_json::json;
+        let mut cfg = test_config();
+        cfg.backend_kind = BackendKind::EnvoyBackend;
+        let fqdn_json = json!({
+            "http": {
+                "routers": {
+                    "r1": {
+                        "rule": "Host(`pangolin.example.com`)",
+                        "service": "s1",
+                    }
+                },
+                "services": {
+                    "s1": {
+                        "loadBalancer": {
+                            "servers": [{"url": "https://upstream.example.com"}]
+                        }
+                    }
+                }
+            }
+        });
+        let dyn_config: TraefikDynamicConfig = serde_json::from_value(fqdn_json).unwrap();
+        let desired = build_desired(&cfg, &dyn_config);
+
+        assert_eq!(desired.envoy_backends.len(), 1);
+        let be = desired.envoy_backends.values().next().unwrap();
+        let ep = &be.spec.endpoints[0];
+        assert!(ep.ip.is_none());
+        let fqdn = ep.fqdn.as_ref().expect("fqdn");
+        assert_eq!(fqdn.hostname, "upstream.example.com");
+        assert_eq!(fqdn.port, 443);
+    }
+
+    #[test]
+    fn service_mode_drops_bare_fqdn() {
+        use serde_json::json;
+        let cfg = test_config(); // service mode
+        let fqdn_json = json!({
+            "http": {
+                "routers": {
+                    "r1": {
+                        "rule": "Host(`pangolin.example.com`)",
+                        "service": "s1",
+                    }
+                },
+                "services": {
+                    "s1": {
+                        "loadBalancer": {
+                            "servers": [{"url": "https://upstream.example.com"}]
+                        }
+                    }
+                }
+            }
+        });
+        let dyn_config: TraefikDynamicConfig = serde_json::from_value(fqdn_json).unwrap();
+        let desired = build_desired(&cfg, &dyn_config);
+
+        // Router referenced a service that couldn't be resolved -> no HTTPRoute.
+        assert!(desired.http_routes.is_empty());
+        assert!(desired.services.is_empty());
+        assert!(desired.envoy_backends.is_empty());
     }
 
     #[test]

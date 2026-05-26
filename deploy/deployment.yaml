@@ -1,30 +1,30 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pangolin-envoy-controller
+  name: pangolin-gateway-controller
   namespace: pangolin-system
   labels:
-    app.kubernetes.io/name: pangolin-envoy-controller
+    app.kubernetes.io/name: pangolin-gateway-controller
 spec:
   replicas: 1
   strategy:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: pangolin-envoy-controller
+      app.kubernetes.io/name: pangolin-gateway-controller
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: pangolin-envoy-controller
+        app.kubernetes.io/name: pangolin-gateway-controller
     spec:
-      serviceAccountName: pangolin-envoy-controller
+      serviceAccountName: pangolin-gateway-controller
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: controller
-          image: ghcr.io/envisia/pangolin-envoy-controller:0.1.0
+          image: ghcr.io/envisia/pangolin-gateway-controller:0.1.0
           imagePullPolicy: IfNotPresent
           env:
             # --- required ---
@@ -53,7 +53,7 @@ spec:
             # - name: CONFIG_LISTENERSET_ANNOTATIONS
             #   value: "cert-manager.io/cluster-issuer=letsencrypt-prod"
             - name: RUST_LOG
-              value: "info,pangolin_envoy_controller=info"
+              value: "info,pangolin_gateway_controller=info"
           resources:
             requests:
               cpu: 50m

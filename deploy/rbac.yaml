@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: pangolin-envoy-controller
+  name: pangolin-gateway-controller
   namespace: pangolin-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: pangolin-envoy-controller
+  name: pangolin-gateway-controller
 rules:
   # Gateway API objects we own.
   - apiGroups: ["gateway.networking.k8s.io"]
@@ -27,16 +27,21 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways", "gatewayclasses"]
     verbs: ["get", "list", "watch"]
+  # Envoy Gateway's Backend CRD. Only used when CONFIG_BACKEND_KIND=envoy-backend.
+  # Safe to leave granted even when unused — RBAC checks happen lazily.
+  - apiGroups: ["gateway.envoyproxy.io"]
+    resources: ["backends"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: pangolin-envoy-controller
+  name: pangolin-gateway-controller
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: pangolin-envoy-controller
+  name: pangolin-gateway-controller
 subjects:
   - kind: ServiceAccount
-    name: pangolin-envoy-controller
+    name: pangolin-gateway-controller
     namespace: pangolin-system

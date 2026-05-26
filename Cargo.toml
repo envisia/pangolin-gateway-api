@@ -1,17 +1,17 @@
 [package]
-name = "pangolin-envoy-controller"
+name = "pangolin-gateway-controller"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 description = "Kubernetes controller that reconciles pangolin's Traefik dynamic config into Gateway API objects (HTTPRoute, ListenerSet) for Envoy Gateway"
-repository = "https://github.com/envisia/pangolin-envoy-controller"
+repository = "https://github.com/envisia/pangolin-gateway-controller"
 readme = "README.md"
 keywords = ["kubernetes", "gateway-api", "envoy", "pangolin", "controller"]
 categories = ["network-programming"]
 
 [[bin]]
-name = "pangolin-envoy-controller"
+name = "pangolin-gateway-controller"
 path = "src/main.rs"
 
 [dependencies]

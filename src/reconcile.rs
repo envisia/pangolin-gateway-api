@@ -13,7 +13,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::apply::ssa_apply;
-use crate::config::Config;
+use crate::config::{BackendKind, Config};
+use crate::envoy_gateway::Backend as EnvoyBackend;
 use crate::gc;
 use crate::pangolin::{Client as PangClient, FetchOutcome};
 use crate::transform::{Desired, build_desired};
@@ -100,6 +101,7 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     let ls_api: Api<ListenerSet> = Api::namespaced(kube_client.clone(), ns);
     let svc_api: Api<Service> = Api::namespaced(kube_client.clone(), ns);
     let eps_api: Api<EndpointSlice> = Api::namespaced(kube_client.clone(), ns);
+    let be_api: Api<EnvoyBackend> = Api::namespaced(kube_client.clone(), ns);
 
     // Apply backends first so HTTPRoute backendRefs resolve immediately.
     for svc in desired.services.values() {
@@ -107,6 +109,9 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     }
     for eps in desired.endpoint_slices.values() {
         ssa_apply(&eps_api, cfg, eps).await?;
+    }
+    for be in desired.envoy_backends.values() {
+        ssa_apply(&be_api, cfg, be).await?;
     }
     // Then listener set so the parent for routes exists.
     for ls in desired.listener_sets.values() {
@@ -121,6 +126,7 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     let ls_names: BTreeSet<String> = desired.listener_sets.keys().cloned().collect();
     let svc_names: BTreeSet<String> = desired.services.keys().cloned().collect();
     let eps_names: BTreeSet<String> = desired.endpoint_slices.keys().cloned().collect();
+    let be_names: BTreeSet<String> = desired.envoy_backends.keys().cloned().collect();
 
     if let Err(e) = gc::sweep(&route_api, cfg, &route_names).await {
         warn!(error = ?e, "GC HTTPRoute failed");
@@ -133,6 +139,13 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     }
     if let Err(e) = gc::sweep(&svc_api, cfg, &svc_names).await {
         warn!(error = ?e, "GC Service failed");
+    }
+    // Only sweep Envoy Backends when the controller is in that mode; otherwise
+    // the Backend CRD may not be installed and the list call would 404.
+    if cfg.backend_kind == BackendKind::EnvoyBackend
+        && let Err(e) = gc::sweep(&be_api, cfg, &be_names).await
+    {
+        warn!(error = ?e, "GC Envoy Backend failed");
     }
     Ok(())
 }

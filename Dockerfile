@@ -21,10 +21,10 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 COPY tests ./tests
-RUN cargo build --release --bin pangolin-envoy-controller \
- && strip target/release/pangolin-envoy-controller
+RUN cargo build --release --bin pangolin-gateway-controller \
+ && strip target/release/pangolin-gateway-controller
 
 FROM gcr.io/distroless/cc-debian12:nonroot
-COPY --from=builder /work/target/release/pangolin-envoy-controller /usr/local/bin/pangolin-envoy-controller
+COPY --from=builder /work/target/release/pangolin-gateway-controller /usr/local/bin/pangolin-gateway-controller
 USER nonroot:nonroot
-ENTRYPOINT ["/usr/local/bin/pangolin-envoy-controller"]
+ENTRYPOINT ["/usr/local/bin/pangolin-gateway-controller"]
