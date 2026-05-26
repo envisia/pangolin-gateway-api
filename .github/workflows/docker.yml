@@ -1,0 +1,146 @@
+name: Docker
+
+on:
+  push:
+    # Publishing is gated on tag pushes only. Tags reachable from `main` is the
+    # convention; CI does not enforce it (Git tags aren't branch-scoped).
+    # Branch pushes do NOT trigger a build/publish — open a PR for that.
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Top-level perms intentionally tight; the build job elevates only what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  # ghcr.io path follows the repo name; image name is the repo's last segment.
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    name: build & publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write       # push to ghcr.io
+      id-token: write       # cosign keyless OIDC + attestations
+      attestations: write   # actions/attest-build-provenance, attest-sbom
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Log in to ghcr.io
+        # PR runs from forks have no write token; skip login then. Same for the
+        # PR base run, but we keep `push` off in the build step instead of
+        # gating login here.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # On PRs: tag with `pr-<number>` so CI builds are visible but not consumed.
+            type=ref,event=pr
+            # On tag pushes (vMAJOR.MINOR.PATCH): tag with the full version and the
+            # rolling MAJOR.MINOR. Pre-release tags (vX.Y.Z-rc.N) match the same
+            # patterns; the major+minor rolls onto the pre-release, which is fine
+            # since consumers typically pin to a full version anyway.
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # Always include the long commit SHA for immutable reference.
+            type=sha,format=long
+            # `latest` only for non-pre-release tag pushes.
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+
+      - name: Build & (maybe) push
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Generate SBOM + SLSA provenance during the build. They land both on
+          # the registry (as referrers) and on the workflow run.
+          sbom: true
+          provenance: mode=max
+          # Pre-compute the manifest digest so cosign signs the index, not the
+          # platform-specific manifests.
+          outputs: type=image,name=target,annotation-index.org.opencontainers.image.description=pangolin-gateway-controller
+
+      - name: Cosign sign image (keyless)
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          # Sign each ref@digest so any tag a consumer pulls verifies. The
+          # digest is the manifest index digest, which is what consumers should
+          # be pinning anyway.
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            echo "::group::cosign sign ${tag}@${DIGEST}"
+            cosign sign --yes "${tag}@${DIGEST}"
+            echo "::endgroup::"
+          done <<< "$TAGS"
+
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Generate SBOM (SPDX)
+        if: github.event_name != 'pull_request'
+        id: sbom
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Attest SBOM
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true

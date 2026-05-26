@@ -1,0 +1,59 @@
+{
+    "http": {
+        "middlewares": {
+            "redirect-to-https": {
+                "redirectScheme": {
+                    "scheme": "https"
+                }
+            },
+            "badger": {
+                "plugin": {
+                    "badger": {
+                        "apiBaseUrl": "http://pangolin.pangolin-1.svc.cluster.local:3001/api/v1",
+                        "userSessionCookieName": "p_session_token",
+                        "accessTokenQueryParam": "p_token",
+                        "resourceSessionRequestParam": "p_session_request"
+                    }
+                }
+            }
+        },
+        "routers": {
+            "2-Echoserver-Local-router": {
+                "entryPoints": [
+                    "websecure"
+                ],
+                "middlewares": [
+                    "badger"
+                ],
+                "service": "2-Echoserver-Local-service",
+                "rule": "Host(`echo-local.development.fossorial.de`)",
+                "priority": 100,
+                "tls": {
+                    "certResolver": "letsencrypt"
+                }
+            },
+            "2-Echoserver-Local-router-redirect": {
+                "entryPoints": [
+                    "web"
+                ],
+                "middlewares": [
+                    "redirect-to-https"
+                ],
+                "service": "2-Echoserver-Local-service",
+                "rule": "Host(`echo-local.development.fossorial.de`)",
+                "priority": 100
+            }
+        },
+        "services": {
+            "2-Echoserver-Local-service": {
+                "loadBalancer": {
+                    "servers": [
+                        {
+                            "url": "http://echoserver.dummyservices.svc.cluster.local:80"
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}

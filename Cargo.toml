@@ -1,0 +1,50 @@
+[package]
+name = "pangolin-gateway-controller"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Kubernetes controller that reconciles pangolin's Traefik dynamic config into Gateway API objects (HTTPRoute, ListenerSet) for Envoy Gateway"
+repository = "https://github.com/envisia/pangolin-gateway-controller"
+readme = "README.md"
+keywords = ["kubernetes", "gateway-api", "envoy", "pangolin", "controller"]
+categories = ["network-programming"]
+
+[lib]
+name = "pangolin_gateway_controller"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pangolin-gateway-controller"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+gateway-api = { version = "0.21", features = ["experimental"] }
+hex = "0.4"
+humantime = "2"
+k8s-openapi = { version = "0.27", features = ["v1_32"] }
+kube = { version = "3.1", default-features = false, features = ["client", "derive", "runtime", "rustls-tls", "ring"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

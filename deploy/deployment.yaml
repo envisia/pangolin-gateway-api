@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pangolin-gateway-controller
+  namespace: pangolin-system
+  labels:
+    app.kubernetes.io/name: pangolin-gateway-controller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pangolin-gateway-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pangolin-gateway-controller
+    spec:
+      serviceAccountName: pangolin-gateway-controller
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: ghcr.io/envisia/pangolin-gateway-controller:0.1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            # --- required ---
+            - name: CONFIG_ENDPOINT
+              value: "http://pangolin.pangolin-system.svc.cluster.local:8081/api/v1/traefik-config"
+            - name: CONFIG_NAMESPACE
+              value: "pangolin-system"
+            - name: CONFIG_PARENT_GATEWAY
+              value: "eg"
+            # --- optional ---
+            - name: CONFIG_PARENT_GATEWAY_NAMESPACE
+              value: "envoy-gateway-system"
+            - name: CONFIG_LISTENERSET_NAME
+              value: "pangolin"
+            - name: CONFIG_POLL_INTERVAL
+              value: "30s"
+            - name: CONFIG_ENABLE_HTTPS_LISTENERS
+              value: "true"
+            - name: CONFIG_TLS_SECRET_TEMPLATE
+              value: "{hostname-dashed}-tls"
+            # cert-manager wiring (optional). Annotations are forwarded as-is to the
+            # objects the controller creates; cert-manager's gateway-shim then mints
+            # the Secret referenced by the template above.
+            # - name: CONFIG_HTTPROUTE_ANNOTATIONS
+            #   value: "cert-manager.io/cluster-issuer=letsencrypt-prod"
+            # - name: CONFIG_LISTENERSET_ANNOTATIONS
+            #   value: "cert-manager.io/cluster-issuer=letsencrypt-prod"
+            - name: RUST_LOG
+              value: "info,pangolin_gateway_controller=info"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
