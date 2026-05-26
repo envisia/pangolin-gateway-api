@@ -9,8 +9,7 @@ name: E2E (pangolin)
 #      assert the right HTTPRoute / ListenerSet / Service / EndpointSlice
 #      objects land in the cluster.
 #
-# Same owner-only gating as the cluster integration workflow: triggers on
-# manual dispatch or on PRs that carry the `integration` label.
+# Runs on every PR and push to main, plus manual dispatch.
 on:
   workflow_dispatch:
     inputs:
@@ -27,14 +26,15 @@ on:
         required: false
         default: fosrl/pangolin:latest
   pull_request:
-    types: [labeled, synchronize, reopened]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 concurrency:
   group: e2e-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -54,10 +54,6 @@ env:
 jobs:
   e2e:
     name: e2e (pangolin)
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'integration'))
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:

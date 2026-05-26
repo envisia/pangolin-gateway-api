@@ -1,12 +1,6 @@
 name: Integration (cluster)
 
-# Triggered manually, or on a PR that carries the `integration` label.
-#
-# Owner-gating: only repo collaborators with at least triage permission can
-# add labels to a PR, so external contributors can't kick off these runs by
-# themselves. The owner adds the `integration` label when they want CI to run
-# the cluster suite for a PR; pushes to the PR after that re-trigger via
-# `synchronize` as long as the label is still on.
+# Runs on every PR and push to main, plus manual dispatch.
 on:
   workflow_dispatch:
     inputs:
@@ -23,14 +17,15 @@ on:
         required: false
         default: v1.2.4
   pull_request:
-    types: [labeled, synchronize, reopened]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 concurrency:
   group: integration-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -43,11 +38,6 @@ env:
 jobs:
   cluster-integration:
     name: integration (${{ matrix.mode }})
-    # Run on manual dispatch, or when the PR carries the `integration` label.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'integration'))
     strategy:
       fail-fast: false
       matrix:
