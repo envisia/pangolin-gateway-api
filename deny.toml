@@ -35,6 +35,11 @@ confidence-threshold = 0.8
 # allowed here is allowed *only* for the named crate, so a future dependency
 # under the same license still requires an explicit policy decision.
 exceptions = [
+    # The combined work is AGPL-3.0-only (see Cargo.toml). Scoped here to
+    # this crate alone so a transitive AGPL dependency would still require
+    # an explicit policy decision — copyleft on a dep affects every
+    # downstream consumer, not just this controller.
+    { allow = ["AGPL-3.0-only"], name = "pangolin-gateway-controller" },
     # webpki-roots ships Mozilla's CA bundle under the Linux Foundation's
     # Community Data License Agreement (Permissive 2.0). Functionally
     # equivalent to MIT/BSD for our redistribution purposes: permissive,
