@@ -93,8 +93,11 @@ jobs:
           kubectl get nodes -o wide
 
       - name: Install Gateway API experimental CRDs
+        # Server-side apply is required: the HTTPRoute v1.5.1 CRD is large
+        # enough that client-side apply blows past the 256 KiB cap on
+        # `kubectl.kubernetes.io/last-applied-configuration`.
         run: |
-          kubectl apply -f \
+          kubectl apply --server-side --force-conflicts -f \
             "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/experimental-install.yaml"
           for crd in \
             httproutes.gateway.networking.k8s.io \
@@ -106,7 +109,7 @@ jobs:
       - name: Install Envoy Gateway Backend CRD
         if: matrix.install_envoy_backend_crd
         run: |
-          kubectl apply -f \
+          kubectl apply --server-side --force-conflicts -f \
             "https://raw.githubusercontent.com/envoyproxy/gateway/${ENVOY_GATEWAY_VERSION}/charts/gateway-helm/crds/generated/gateway.envoyproxy.io_backends.yaml"
           kubectl wait --for=condition=Established --timeout=60s \
             crd/backends.gateway.envoyproxy.io
