@@ -25,6 +25,8 @@ RUN cargo build --release --bin pangolin-gateway-controller \
  && strip target/release/pangolin-gateway-controller
 
 FROM gcr.io/distroless/cc-debian12:nonroot
-COPY --from=builder /work/target/release/pangolin-gateway-controller /usr/local/bin/pangolin-gateway-controller
-USER nonroot:nonroot
+COPY --from=builder --chown=65532:65532 --chmod=0555 \
+    /work/target/release/pangolin-gateway-controller \
+    /usr/local/bin/pangolin-gateway-controller
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/pangolin-gateway-controller"]
