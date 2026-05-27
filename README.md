@@ -156,6 +156,9 @@ and UDP paths have been validated against Envoy Gateway.
 For the Gerbil public-IP migration pattern, including direct old-IP traffic plus
 a separate Envoy Gateway IP, see
 [docs/gerbil-gateway-migration.md](docs/gerbil-gateway-migration.md).
+For the shared-IP path where only HTTP/HTTPS moves from Traefik to Envoy while
+Gerbil keeps the WireGuard UDP ports, see
+[docs/shared-ip-http-envoy-migration.md](docs/shared-ip-http-envoy-migration.md).
 
 ## Certificate handling with cert-manager
 

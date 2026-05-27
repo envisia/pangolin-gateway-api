@@ -4,6 +4,10 @@ This is the safe rollout shape for moving Gerbil L4 traffic toward Envoy
 Gateway without taking the old public address away from the existing Gerbil
 `LoadBalancer` Service.
 
+For the shared-IP variant where Gerbil keeps UDP and only HTTP/HTTPS moves from
+Traefik to Envoy, see
+[shared-ip-http-envoy-migration.md](shared-ip-http-envoy-migration.md).
+
 ## Target Shape
 
 ```mermaid

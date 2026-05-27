@@ -176,6 +176,9 @@ selected hostname's `HTTPRoute` and `SecurityPolicy` are accepted by Envoy
 Gateway and the auth shim returns the expected allow/redirect/deny responses.
 For Gerbil's old-IP plus Envoy-IP migration pattern, see
 [`docs/gerbil-gateway-migration.md`](../docs/gerbil-gateway-migration.md).
+For a shared public IP where only TCP `80`/`443` moves from Traefik to Envoy,
+see
+[`docs/shared-ip-http-envoy-migration.md`](../docs/shared-ip-http-envoy-migration.md).
 
 ## Embedding from another kustomization
 
