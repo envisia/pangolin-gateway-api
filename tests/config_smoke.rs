@@ -4,7 +4,7 @@
 //! within this binary — `std::env::set_var` is process-global and racy with
 //! parallel tests.
 
-use pangolin_gateway_controller::config::{BackendKind, Config};
+use pangolin_gateway_controller::config::{BackendKind, Config, ReconcileKind, ReconcileScope};
 
 const CONFIG_ENV_KEYS: &[&str] = &[
     "CONFIG_ENDPOINT",
@@ -36,6 +36,25 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "CONFIG_MANAGED_ANNOTATION_VALUE",
     "CONFIG_HTTPROUTE_ANNOTATIONS",
     "CONFIG_LISTENERSET_ANNOTATIONS",
+    "CONFIG_BADGER_EXT_AUTH",
+    "CONFIG_BADGER_EXT_AUTH_BACKEND_NAME",
+    "CONFIG_BADGER_EXT_AUTH_BACKEND_NAMESPACE",
+    "CONFIG_BADGER_EXT_AUTH_BACKEND_PORT",
+    "CONFIG_BADGER_EXT_AUTH_PATH",
+    "CONFIG_BADGER_EXT_AUTH_HEADERS_TO_EXTAUTH",
+    "CONFIG_BADGER_EXT_AUTH_HEADERS_TO_BACKEND",
+    "CONFIG_BADGER_EXT_AUTH_FAIL_OPEN",
+    "CONFIG_PANGOLIN_DASHBOARD_HOST",
+    "CONFIG_PANGOLIN_SERVICE_NAME",
+    "CONFIG_PANGOLIN_SERVICE_NAMESPACE",
+    "CONFIG_PANGOLIN_API_PORT",
+    "CONFIG_PANGOLIN_NEXT_PORT",
+    "CONFIG_PANGOLIN_REDIRECT_HTTP_TO_HTTPS",
+    "CONFIG_GERBIL_UDP_ROUTE",
+    "CONFIG_GERBIL_SERVICE_NAME",
+    "CONFIG_GERBIL_SERVICE_NAMESPACE",
+    "CONFIG_GERBIL_UDP_PORTS",
+    "CONFIG_RECONCILE_ONLY",
     "CONFIG_READ_ONLY",
     "CONFIG_LOG_TRAEFIK_CONFIG",
 ];
@@ -74,6 +93,33 @@ fn backend_kind_parses_known_spellings() {
 
     let err = BackendKind::parse("traefik").unwrap_err().to_string();
     assert!(err.contains("CONFIG_BACKEND_KIND"));
+}
+
+#[test]
+fn reconcile_scope_parses_selectors() {
+    let scope =
+        ReconcileScope::parse("HTTPRoute/hr-a,SecurityPolicy/sp-a,Service:svc-a,shared-name")
+            .unwrap();
+    assert!(scope.includes(ReconcileKind::HttpRoute, "hr-a"));
+    assert!(scope.includes(ReconcileKind::SecurityPolicy, "sp-a"));
+    assert!(scope.includes(ReconcileKind::Service, "svc-a"));
+    assert!(scope.includes(ReconcileKind::ListenerSet, "shared-name"));
+    assert!(!scope.includes(ReconcileKind::HttpRoute, "sp-a"));
+}
+
+#[test]
+fn reconcile_scope_treats_bare_names_as_hostname_candidates() {
+    let scope = ReconcileScope::parse("app.example.com,Hostname:admin.example.com").unwrap();
+
+    assert!(scope.includes(ReconcileKind::HttpRoute, "app.example.com"));
+    assert!(!scope.includes(ReconcileKind::HttpRoute, "admin.example.com"));
+    assert_eq!(
+        scope.hostname_candidates(),
+        vec![
+            "app.example.com".to_string(),
+            "admin.example.com".to_string()
+        ]
+    );
 }
 
 #[test]
@@ -141,6 +187,10 @@ fn from_env_smoke() {
     assert!(!cfg.read_only);
     assert!(cfg.httproute_annotations.is_empty());
     assert!(cfg.listenerset_annotations.is_empty());
+    assert!(cfg.badger_ext_auth.is_none());
+    assert!(cfg.pangolin_dashboard.is_none());
+    assert!(cfg.gerbil_udp.is_none());
+    assert!(cfg.reconcile_scope.is_all());
 
     // Step 5: full env override exercises every parser branch.
     clear_all();
@@ -170,6 +220,34 @@ fn from_env_smoke() {
     set(
         "CONFIG_LISTENERSET_ANNOTATIONS",
         "cert-manager.io/cluster-issuer=letsencrypt-prod",
+    );
+    set("CONFIG_BADGER_EXT_AUTH", "true");
+    set("CONFIG_BADGER_EXT_AUTH_BACKEND_NAME", "badger-shim");
+    set("CONFIG_BADGER_EXT_AUTH_BACKEND_NAMESPACE", "auth");
+    set("CONFIG_BADGER_EXT_AUTH_BACKEND_PORT", "9003");
+    set("CONFIG_BADGER_EXT_AUTH_PATH", "/authorize");
+    set(
+        "CONFIG_BADGER_EXT_AUTH_HEADERS_TO_EXTAUTH",
+        "cookie,authorization,x-forwarded-for",
+    );
+    set(
+        "CONFIG_BADGER_EXT_AUTH_HEADERS_TO_BACKEND",
+        "remote-user,remote-email",
+    );
+    set("CONFIG_BADGER_EXT_AUTH_FAIL_OPEN", "true");
+    set("CONFIG_PANGOLIN_DASHBOARD_HOST", "pangolin.example.com");
+    set("CONFIG_PANGOLIN_SERVICE_NAME", "pangolin-api");
+    set("CONFIG_PANGOLIN_SERVICE_NAMESPACE", "pangolin-system");
+    set("CONFIG_PANGOLIN_API_PORT", "3001");
+    set("CONFIG_PANGOLIN_NEXT_PORT", "3002");
+    set("CONFIG_PANGOLIN_REDIRECT_HTTP_TO_HTTPS", "false");
+    set("CONFIG_GERBIL_UDP_ROUTE", "true");
+    set("CONFIG_GERBIL_SERVICE_NAME", "gerbil-edge");
+    set("CONFIG_GERBIL_SERVICE_NAMESPACE", "pangolin-system");
+    set("CONFIG_GERBIL_UDP_PORTS", "51820,21820");
+    set(
+        "CONFIG_RECONCILE_ONLY",
+        "HTTPRoute/hr-one,SecurityPolicy/sp-one",
     );
     set("CONFIG_READ_ONLY", "true");
     let cfg = Config::from_env().expect("full override");
@@ -202,6 +280,30 @@ fn from_env_smoke() {
         Some("letsencrypt-prod"),
     );
     assert_eq!(cfg.listenerset_annotations.len(), 1);
+    let ext_auth = cfg.badger_ext_auth.as_ref().expect("badger ext auth");
+    assert_eq!(ext_auth.backend_name, "badger-shim");
+    assert_eq!(ext_auth.backend_namespace.as_deref(), Some("auth"));
+    assert_eq!(ext_auth.backend_port, 9003);
+    assert_eq!(ext_auth.path.as_deref(), Some("/authorize"));
+    assert_eq!(ext_auth.headers_to_ext_auth.len(), 3);
+    assert_eq!(ext_auth.headers_to_backend.len(), 2);
+    assert!(ext_auth.fail_open);
+    let dashboard = cfg.pangolin_dashboard.as_ref().expect("dashboard");
+    assert_eq!(dashboard.hostname, "pangolin.example.com");
+    assert_eq!(dashboard.service_name, "pangolin-api");
+    assert_eq!(dashboard.api_port, 3001);
+    assert!(!dashboard.redirect_http_to_https);
+    let gerbil = cfg.gerbil_udp.as_ref().expect("gerbil");
+    assert_eq!(gerbil.service_name, "gerbil-edge");
+    assert_eq!(gerbil.ports, vec![51820, 21820]);
+    assert!(
+        cfg.reconcile_scope
+            .includes(ReconcileKind::HttpRoute, "hr-one")
+    );
+    assert!(
+        !cfg.reconcile_scope
+            .includes(ReconcileKind::HttpRoute, "sp-one")
+    );
     assert!(cfg.read_only);
 
     // managed_selector is the contract GC relies on — verify the format.

@@ -22,7 +22,7 @@ pub struct TraefikDynamicConfig {
     /// Opaque TCP block. Reserved for future TCPRoute support.
     #[serde(default)]
     pub tcp: Option<Value>,
-    /// Opaque UDP block. Reserved for future UDPRoute support.
+    /// Opaque UDP block. Reserved for future dynamic UDPRoute support.
     #[serde(default)]
     pub udp: Option<Value>,
 }

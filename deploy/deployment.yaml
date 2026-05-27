@@ -54,6 +54,23 @@ spec:
             #   value: "cert-manager.io/cluster-issuer=letsencrypt-prod"
             # - name: CONFIG_LISTENERSET_ANNOTATIONS
             #   value: "cert-manager.io/cluster-issuer=letsencrypt-prod"
+            # Badger ext_authz (optional). Point this at an Envoy ext_auth-compatible
+            # shim for pangolin's /api/v1/badger/verify-session protocol.
+            # - name: CONFIG_BADGER_EXT_AUTH
+            #   value: "true"
+            # - name: CONFIG_BADGER_EXT_AUTH_BACKEND_NAME
+            #   value: "pangolin-badger-ext-authz"
+            # - name: CONFIG_BADGER_EXT_AUTH_BACKEND_PORT
+            #   value: "9002"
+            # Test-mode reconcile scope (optional), e.g. only one hostname.
+            # - name: CONFIG_RECONCILE_ONLY
+            #   value: "9-chris.example.com"
+            # Pangolin dashboard through Gateway API (optional).
+            # - name: CONFIG_PANGOLIN_DASHBOARD_HOST
+            #   value: "pangolin.example.com"
+            # Gerbil UDP through Gateway API (optional; requires UDPRoute support).
+            # - name: CONFIG_GERBIL_UDP_ROUTE
+            #   value: "true"
             - name: RUST_LOG
               value: "info,pangolin_gateway_controller=info"
           resources:

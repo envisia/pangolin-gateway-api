@@ -51,6 +51,22 @@ pub fn build_listener_set(cfg: &Config, routes: &RouteIndex, desired: &mut Desir
         }
     }
 
+    if let Some(gerbil) = cfg.gerbil_udp.as_ref() {
+        for port in &gerbil.ports {
+            listeners.push(ListenerSetListeners {
+                name: crate::transform::naming::prefixed_label(
+                    "udp",
+                    &format!("gerbil-udp-{port}"),
+                ),
+                hostname: None,
+                port: *port,
+                protocol: "UDP".into(),
+                tls: None,
+                allowed_routes: None,
+            });
+        }
+    }
+
     let name = dns_label(&cfg.listener_set_name);
     let labels = owner_labels(cfg, &name);
 

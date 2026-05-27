@@ -11,7 +11,10 @@ use std::time::Duration;
 use serde_json::json;
 use url::Url;
 
-use pangolin_gateway_controller::config::{BackendKind, Config};
+use pangolin_gateway_controller::config::{
+    BackendKind, BadgerExtAuthConfig, Config, GerbilUdpConfig, PangolinDashboardConfig,
+    ReconcileScope,
+};
 use pangolin_gateway_controller::pangolin::TraefikDynamicConfig;
 use pangolin_gateway_controller::transform::build_desired;
 
@@ -44,6 +47,10 @@ fn test_config() -> Config {
         managed_annotation_value: "pangolin-gateway-controller".into(),
         httproute_annotations: BTreeMap::new(),
         listenerset_annotations: BTreeMap::new(),
+        badger_ext_auth: None,
+        pangolin_dashboard: None,
+        gerbil_udp: None,
+        reconcile_scope: ReconcileScope::all(),
         read_only: false,
         log_traefik_config: false,
     }
@@ -343,4 +350,171 @@ fn redirect_router_drops_backend_refs() {
         .expect("redirect HTTPRoute must carry filters");
     assert_eq!(filters.len(), 1);
     assert!(filters[0].request_redirect.is_some());
+}
+
+#[test]
+fn badger_ext_auth_emits_security_policy() {
+    let mut cfg = test_config();
+    cfg.badger_ext_auth = Some(BadgerExtAuthConfig {
+        backend_name: "badger-shim".into(),
+        backend_namespace: Some("gateway".into()),
+        backend_port: 9002,
+        path: None,
+        headers_to_ext_auth: vec!["cookie".into(), "authorization".into()],
+        headers_to_backend: vec!["remote-user".into()],
+        fail_open: false,
+    });
+
+    let dyn_config: TraefikDynamicConfig = serde_json::from_value(json!({
+        "http": {
+            "routers": {
+                "r1": {
+                    "rule": "Host(`protected.example.com`)",
+                    "service": "s1",
+                    "middlewares": ["badger"]
+                }
+            },
+            "services": {
+                "s1": {
+                    "loadBalancer": { "servers": [{"url": "http://10.0.0.7:8080"}] }
+                }
+            },
+            "middlewares": {
+                "badger": { "plugin": { "badger": { "disableForwardAuth": true } } }
+            }
+        }
+    }))
+    .unwrap();
+
+    let desired = build_desired(&cfg, &dyn_config);
+
+    assert_eq!(desired.http_routes.len(), 1);
+    assert_eq!(desired.security_policies.len(), 1);
+    let route_name = desired.http_routes.keys().next().unwrap();
+    let policy = desired.security_policies.values().next().unwrap();
+    let target = &policy.spec.target_refs.as_ref().unwrap()[0];
+    assert_eq!(target.kind, "HTTPRoute");
+    assert_eq!(&target.name, route_name);
+    let ext_auth = policy.spec.ext_auth.as_ref().unwrap();
+    assert_eq!(
+        ext_auth.headers_to_ext_auth.as_ref().unwrap(),
+        &vec!["cookie".to_string(), "authorization".to_string()]
+    );
+    let http = ext_auth.http.as_ref().unwrap();
+    assert_eq!(http.backend_refs[0].name, "badger-shim");
+    assert_eq!(http.backend_refs[0].port, 9002);
+    assert_eq!(
+        http.headers_to_backend.as_ref().unwrap(),
+        &vec!["remote-user".to_string()]
+    );
+}
+
+#[test]
+fn dashboard_routes_split_api_web_and_redirect() {
+    let mut cfg = test_config();
+    cfg.pangolin_dashboard = Some(PangolinDashboardConfig {
+        hostname: "pangolin.example.com".into(),
+        service_name: "pangolin".into(),
+        service_namespace: Some("gateway".into()),
+        api_port: 3000,
+        next_port: 3002,
+        redirect_http_to_https: true,
+    });
+
+    let dyn_config: TraefikDynamicConfig = serde_json::from_value(json!({
+        "http": {
+            "routers": {},
+            "services": {}
+        }
+    }))
+    .unwrap();
+
+    let desired = build_desired(&cfg, &dyn_config);
+
+    assert_eq!(desired.http_routes.len(), 4);
+    let listener_set = desired.listener_sets.values().next().unwrap();
+    assert!(
+        listener_set
+            .spec
+            .listeners
+            .iter()
+            .any(|l| l.hostname.as_deref() == Some("pangolin.example.com") && l.protocol == "HTTPS")
+    );
+
+    let api = desired
+        .http_routes
+        .values()
+        .find(|r| r.metadata.name.as_deref().unwrap().contains("api"))
+        .expect("api route");
+    let api_ref = &api.spec.rules.as_ref().unwrap()[0]
+        .backend_refs
+        .as_ref()
+        .unwrap()[0];
+    assert_eq!(api_ref.name, "pangolin");
+    assert_eq!(api_ref.port, Some(3000));
+
+    let web = desired
+        .http_routes
+        .values()
+        .find(|r| r.metadata.name.as_deref().unwrap().contains("web"))
+        .expect("web route");
+    let web_ref = &web.spec.rules.as_ref().unwrap()[0]
+        .backend_refs
+        .as_ref()
+        .unwrap()[0];
+    assert_eq!(web_ref.port, Some(3002));
+
+    let redirect = desired
+        .http_routes
+        .values()
+        .find(|r| r.metadata.name.as_deref().unwrap().contains("redirect"))
+        .expect("redirect route");
+    assert!(
+        redirect.spec.rules.as_ref().unwrap()[0]
+            .filters
+            .as_ref()
+            .unwrap()[0]
+            .request_redirect
+            .is_some()
+    );
+}
+
+#[test]
+fn gerbil_udp_routes_add_udp_listeners() {
+    let mut cfg = test_config();
+    cfg.gerbil_udp = Some(GerbilUdpConfig {
+        service_name: "gerbil".into(),
+        service_namespace: Some("gateway".into()),
+        ports: vec![51820, 21820],
+    });
+
+    let dyn_config: TraefikDynamicConfig = serde_json::from_value(json!({
+        "http": {
+            "routers": {},
+            "services": {}
+        }
+    }))
+    .unwrap();
+
+    let desired = build_desired(&cfg, &dyn_config);
+
+    assert_eq!(desired.udp_routes.len(), 2);
+    let listener_set = desired.listener_sets.values().next().unwrap();
+    for port in [51820, 21820] {
+        assert!(
+            listener_set
+                .spec
+                .listeners
+                .iter()
+                .any(|l| l.port == port && l.protocol == "UDP"),
+            "missing UDP listener for {port}"
+        );
+        assert!(
+            desired.udp_routes.values().any(|route| route.spec.rules[0]
+                .backend_refs
+                .iter()
+                .any(|backend| backend.name == "gerbil" && backend.port == Some(port))),
+            "missing UDPRoute backend for {port}"
+        );
+    }
 }
