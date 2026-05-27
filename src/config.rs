@@ -50,8 +50,154 @@ pub struct Config {
     /// implementations that watch the ListenerSet directly.
     pub listenerset_annotations: BTreeMap<String, String>,
 
+    /// Optional Envoy Gateway external auth wiring for pangolin's badger plugin.
+    pub badger_ext_auth: Option<BadgerExtAuthConfig>,
+
+    /// Optional static routes for serving the Pangolin dashboard through the same
+    /// ListenerSet as managed resources.
+    pub pangolin_dashboard: Option<PangolinDashboardConfig>,
+
+    /// Optional UDP routing for Gerbil's WireGuard-facing ports.
+    pub gerbil_udp: Option<GerbilUdpConfig>,
+
+    /// Optional allow-list used for migration testing. Empty means reconcile all
+    /// desired objects.
+    pub reconcile_scope: ReconcileScope,
+
     pub read_only: bool,
     pub log_traefik_config: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadgerExtAuthConfig {
+    pub backend_name: String,
+    pub backend_namespace: Option<String>,
+    pub backend_port: i32,
+    pub path: Option<String>,
+    pub headers_to_ext_auth: Vec<String>,
+    pub headers_to_backend: Vec<String>,
+    pub fail_open: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PangolinDashboardConfig {
+    pub hostname: String,
+    pub service_name: String,
+    pub service_namespace: Option<String>,
+    pub api_port: i32,
+    pub next_port: i32,
+    pub redirect_http_to_https: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GerbilUdpConfig {
+    pub service_name: String,
+    pub service_namespace: Option<String>,
+    pub ports: Vec<i32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconcileScope {
+    selectors: Vec<ReconcileSelector>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReconcileSelector {
+    kind: Option<ReconcileKind>,
+    name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileKind {
+    HttpRoute,
+    ListenerSet,
+    Service,
+    EndpointSlice,
+    Backend,
+    SecurityPolicy,
+    UDPRoute,
+}
+
+impl ReconcileKind {
+    pub fn parse(s: &str) -> Result<Self> {
+        match normalize_kind(s).as_str() {
+            "httproute" | "httproutes" | "hr" => Ok(Self::HttpRoute),
+            "listenerset" | "listenersets" | "ls" => Ok(Self::ListenerSet),
+            "service" | "services" | "svc" => Ok(Self::Service),
+            "endpointslice" | "endpointslices" | "eps" => Ok(Self::EndpointSlice),
+            "backend" | "backends" | "envoybackend" | "envoybackends" | "be" => Ok(Self::Backend),
+            "securitypolicy" | "securitypolicies" | "sp" => Ok(Self::SecurityPolicy),
+            "udproute" | "udproutes" | "udp" => Ok(Self::UDPRoute),
+            other => bail!(
+                "invalid reconcile object kind {other:?}; expected HTTPRoute, ListenerSet, \
+                 Service, EndpointSlice, Backend, SecurityPolicy, or UDPRoute"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HttpRoute => "HTTPRoute",
+            Self::ListenerSet => "ListenerSet",
+            Self::Service => "Service",
+            Self::EndpointSlice => "EndpointSlice",
+            Self::Backend => "Backend",
+            Self::SecurityPolicy => "SecurityPolicy",
+            Self::UDPRoute => "UDPRoute",
+        }
+    }
+}
+
+impl ReconcileScope {
+    pub fn parse(raw: &str) -> Result<Self> {
+        let mut selectors = Vec::new();
+        for entry in raw.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+
+            let (kind, name) = if let Some((kind, name)) = entry.split_once('/') {
+                (Some(ReconcileKind::parse(kind.trim())?), name.trim())
+            } else if let Some((kind, name)) = entry.split_once(':') {
+                (Some(ReconcileKind::parse(kind.trim())?), name.trim())
+            } else {
+                (None, entry)
+            };
+
+            if name.is_empty() {
+                bail!("CONFIG_RECONCILE_ONLY entry {entry:?} has an empty object name");
+            }
+            selectors.push(ReconcileSelector {
+                kind,
+                name: name.to_string(),
+            });
+        }
+        Ok(Self { selectors })
+    }
+
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    pub fn is_all(&self) -> bool {
+        self.selectors.is_empty()
+    }
+
+    pub fn includes(&self, kind: ReconcileKind, name: &str) -> bool {
+        self.is_all()
+            || self.selectors.iter().any(|selector| {
+                selector.kind.is_none_or(|selected| selected == kind) && selector.name == name
+            })
+    }
+
+    pub fn affects_kind(&self, kind: ReconcileKind) -> bool {
+        self.is_all()
+            || self
+                .selectors
+                .iter()
+                .any(|selector| selector.kind.is_none_or(|selected| selected == kind))
+    }
 }
 
 /// Backend object kind used for IP / FQDN pangolin targets.
@@ -100,6 +246,15 @@ impl Config {
             );
         }
 
+        let namespace = optional_env("CONFIG_NAMESPACE").unwrap_or_else(|| "default".into());
+        let badger_ext_auth = parse_badger_ext_auth(&namespace)?;
+        let pangolin_dashboard = parse_pangolin_dashboard(&namespace)?;
+        let gerbil_udp = parse_gerbil_udp(&namespace)?;
+        let reconcile_scope = optional_env("CONFIG_RECONCILE_ONLY")
+            .map(|raw| ReconcileScope::parse(&raw))
+            .transpose()?
+            .unwrap_or_else(ReconcileScope::all);
+
         Ok(Self {
             pangolin_endpoint,
             auth_header: optional_env("CONFIG_AUTH_HEADER"),
@@ -110,7 +265,7 @@ impl Config {
             tls_skip_verify,
             ca_file: optional_env("CONFIG_CA_FILE"),
 
-            namespace: optional_env("CONFIG_NAMESPACE").unwrap_or_else(|| "default".into()),
+            namespace,
             parent_gateway: required_env("CONFIG_PARENT_GATEWAY")?,
             parent_gateway_namespace: optional_env("CONFIG_PARENT_GATEWAY_NAMESPACE"),
             listener_set_name: optional_env("CONFIG_LISTENERSET_NAME")
@@ -143,6 +298,11 @@ impl Config {
 
             httproute_annotations: parse_kv_env("CONFIG_HTTPROUTE_ANNOTATIONS")?,
             listenerset_annotations: parse_kv_env("CONFIG_LISTENERSET_ANNOTATIONS")?,
+
+            badger_ext_auth,
+            pangolin_dashboard,
+            gerbil_udp,
+            reconcile_scope,
 
             read_only: bool_env("CONFIG_READ_ONLY", false)?,
             log_traefik_config: bool_env("CONFIG_LOG_TRAEFIK_CONFIG", false)?,
@@ -207,6 +367,118 @@ fn i32_env(key: &str, default: i32) -> Result<i32> {
             .parse()
             .with_context(|| format!("invalid i32 for {key}: {v:?}")),
     }
+}
+
+fn parse_badger_ext_auth(namespace: &str) -> Result<Option<BadgerExtAuthConfig>> {
+    if !bool_env("CONFIG_BADGER_EXT_AUTH", false)? {
+        return Ok(None);
+    }
+
+    Ok(Some(BadgerExtAuthConfig {
+        backend_name: optional_env("CONFIG_BADGER_EXT_AUTH_BACKEND_NAME")
+            .unwrap_or_else(|| "pangolin-badger-ext-authz".into()),
+        backend_namespace: optional_env("CONFIG_BADGER_EXT_AUTH_BACKEND_NAMESPACE")
+            .or_else(|| Some(namespace.to_string())),
+        backend_port: i32_env("CONFIG_BADGER_EXT_AUTH_BACKEND_PORT", 9002)?,
+        path: optional_env("CONFIG_BADGER_EXT_AUTH_PATH"),
+        headers_to_ext_auth: csv_env(
+            "CONFIG_BADGER_EXT_AUTH_HEADERS_TO_EXTAUTH",
+            &[
+                "authorization",
+                "cookie",
+                "x-forwarded-for",
+                "x-forwarded-host",
+                "x-forwarded-proto",
+                "x-real-ip",
+                "p-access-token-id",
+                "p-access-token",
+            ],
+        )?,
+        headers_to_backend: csv_env(
+            "CONFIG_BADGER_EXT_AUTH_HEADERS_TO_BACKEND",
+            &["remote-user", "remote-email", "remote-name", "remote-role"],
+        )?,
+        fail_open: bool_env("CONFIG_BADGER_EXT_AUTH_FAIL_OPEN", false)?,
+    }))
+}
+
+fn parse_pangolin_dashboard(namespace: &str) -> Result<Option<PangolinDashboardConfig>> {
+    let Some(hostname) = optional_env("CONFIG_PANGOLIN_DASHBOARD_HOST") else {
+        return Ok(None);
+    };
+
+    Ok(Some(PangolinDashboardConfig {
+        hostname,
+        service_name: optional_env("CONFIG_PANGOLIN_SERVICE_NAME")
+            .unwrap_or_else(|| "pangolin".into()),
+        service_namespace: optional_env("CONFIG_PANGOLIN_SERVICE_NAMESPACE")
+            .or_else(|| Some(namespace.to_string())),
+        api_port: i32_env("CONFIG_PANGOLIN_API_PORT", 3000)?,
+        next_port: i32_env("CONFIG_PANGOLIN_NEXT_PORT", 3002)?,
+        redirect_http_to_https: bool_env("CONFIG_PANGOLIN_REDIRECT_HTTP_TO_HTTPS", true)?,
+    }))
+}
+
+fn parse_gerbil_udp(namespace: &str) -> Result<Option<GerbilUdpConfig>> {
+    if !bool_env("CONFIG_GERBIL_UDP_ROUTE", false)? {
+        return Ok(None);
+    }
+
+    Ok(Some(GerbilUdpConfig {
+        service_name: optional_env("CONFIG_GERBIL_SERVICE_NAME").unwrap_or_else(|| "gerbil".into()),
+        service_namespace: optional_env("CONFIG_GERBIL_SERVICE_NAMESPACE")
+            .or_else(|| Some(namespace.to_string())),
+        ports: i32_csv_env("CONFIG_GERBIL_UDP_PORTS", &[51820, 21820])?,
+    }))
+}
+
+fn csv_env(key: &str, default: &[&str]) -> Result<Vec<String>> {
+    match optional_env(key) {
+        None => Ok(default.iter().map(|s| (*s).to_string()).collect()),
+        Some(raw) => {
+            let values = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            if values.is_empty() {
+                bail!("{key} must contain at least one value when set");
+            }
+            Ok(values)
+        }
+    }
+}
+
+fn i32_csv_env(key: &str, default: &[i32]) -> Result<Vec<i32>> {
+    match optional_env(key) {
+        None => Ok(default.to_vec()),
+        Some(raw) => {
+            let mut out = Vec::new();
+            for entry in raw.split(',') {
+                let entry = entry.trim();
+                if entry.is_empty() {
+                    continue;
+                }
+                out.push(
+                    entry
+                        .parse()
+                        .with_context(|| format!("invalid i32 in {key}: {entry:?}"))?,
+                );
+            }
+            if out.is_empty() {
+                bail!("{key} must contain at least one port when set");
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn normalize_kind(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '-' && *c != '_' && !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 /// Parse a `key=value,key=value,...` list. Empty entries are skipped.

@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use url::Url;
 
-use pangolin_gateway_controller::config::{BackendKind, Config};
+use pangolin_gateway_controller::config::{BackendKind, Config, ReconcileScope};
 use pangolin_gateway_controller::pangolin::{Client, FetchOutcome};
 
 #[derive(Clone)]
@@ -125,6 +125,10 @@ fn config_pointing_at(endpoint: &str) -> Config {
         managed_annotation_value: "pangolin-gateway-controller".into(),
         httproute_annotations: BTreeMap::new(),
         listenerset_annotations: BTreeMap::new(),
+        badger_ext_auth: None,
+        pangolin_dashboard: None,
+        gerbil_udp: None,
+        reconcile_scope: ReconcileScope::all(),
         read_only: false,
         log_traefik_config: false,
     }

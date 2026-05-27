@@ -3,18 +3,19 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use gateway_api::apis::experimental::httproutes::HTTPRoute;
 use gateway_api::apis::experimental::listenersets::ListenerSet;
+use gateway_api::apis::experimental::udproutes::UDPRoute;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
-use kube::Api;
+use kube::{Api, Resource};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::apply::ssa_apply;
-use crate::config::{BackendKind, Config};
-use crate::envoy_gateway::Backend as EnvoyBackend;
+use crate::config::{BackendKind, Config, ReconcileKind};
+use crate::envoy_gateway::{Backend as EnvoyBackend, SecurityPolicy};
 use crate::gc;
 use crate::pangolin::{Client as PangClient, FetchOutcome};
 use crate::transform::{Desired, build_desired};
@@ -102,23 +103,31 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     let svc_api: Api<Service> = Api::namespaced(kube_client.clone(), ns);
     let eps_api: Api<EndpointSlice> = Api::namespaced(kube_client.clone(), ns);
     let be_api: Api<EnvoyBackend> = Api::namespaced(kube_client.clone(), ns);
+    let sp_api: Api<SecurityPolicy> = Api::namespaced(kube_client.clone(), ns);
+    let udp_api: Api<UDPRoute> = Api::namespaced(kube_client.clone(), ns);
 
     // Apply backends first so HTTPRoute backendRefs resolve immediately.
     for svc in desired.services.values() {
-        ssa_apply(&svc_api, cfg, svc).await?;
+        ssa_apply_scoped(&svc_api, cfg, ReconcileKind::Service, svc).await?;
     }
     for eps in desired.endpoint_slices.values() {
-        ssa_apply(&eps_api, cfg, eps).await?;
+        ssa_apply_scoped(&eps_api, cfg, ReconcileKind::EndpointSlice, eps).await?;
     }
     for be in desired.envoy_backends.values() {
-        ssa_apply(&be_api, cfg, be).await?;
+        ssa_apply_scoped(&be_api, cfg, ReconcileKind::Backend, be).await?;
     }
     // Then listener set so the parent for routes exists.
     for ls in desired.listener_sets.values() {
-        ssa_apply(&ls_api, cfg, ls).await?;
+        ssa_apply_scoped(&ls_api, cfg, ReconcileKind::ListenerSet, ls).await?;
+    }
+    for udp in desired.udp_routes.values() {
+        ssa_apply_scoped(&udp_api, cfg, ReconcileKind::UDPRoute, udp).await?;
     }
     for route in desired.http_routes.values() {
-        ssa_apply(&route_api, cfg, route).await?;
+        ssa_apply_scoped(&route_api, cfg, ReconcileKind::HttpRoute, route).await?;
+    }
+    for policy in desired.security_policies.values() {
+        ssa_apply_scoped(&sp_api, cfg, ReconcileKind::SecurityPolicy, policy).await?;
     }
 
     // GC anything we own that's no longer wanted.
@@ -127,6 +136,8 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     let svc_names: BTreeSet<String> = desired.services.keys().cloned().collect();
     let eps_names: BTreeSet<String> = desired.endpoint_slices.keys().cloned().collect();
     let be_names: BTreeSet<String> = desired.envoy_backends.keys().cloned().collect();
+    let sp_names: BTreeSet<String> = desired.security_policies.keys().cloned().collect();
+    let udp_names: BTreeSet<String> = desired.udp_routes.keys().cloned().collect();
 
     if let Err(e) = gc::sweep(&route_api, cfg, &route_names).await {
         warn!(error = ?e, "GC HTTPRoute failed");
@@ -147,7 +158,37 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     {
         warn!(error = ?e, "GC Envoy Backend failed");
     }
+    if cfg.badger_ext_auth.is_some()
+        && let Err(e) = gc::sweep(&sp_api, cfg, &sp_names).await
+    {
+        warn!(error = ?e, "GC SecurityPolicy failed");
+    }
+    if cfg.gerbil_udp.is_some()
+        && let Err(e) = gc::sweep(&udp_api, cfg, &udp_names).await
+    {
+        warn!(error = ?e, "GC UDPRoute failed");
+    }
     Ok(())
+}
+
+async fn ssa_apply_scoped<T>(api: &Api<T>, cfg: &Config, kind: ReconcileKind, obj: &T) -> Result<()>
+where
+    T: Resource<DynamicType = ()>
+        + Clone
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug,
+{
+    let name = obj
+        .meta()
+        .name
+        .as_deref()
+        .context("object has no metadata.name")?;
+    if !cfg.reconcile_scope.includes(kind, name) {
+        info!(kind = %kind.as_str(), name = %name, "reconcile scope: skipping apply");
+        return Ok(());
+    }
+    ssa_apply(api, cfg, obj).await
 }
 
 /// Sleep for `dur`, returning true if shutdown was requested before the timer expired.

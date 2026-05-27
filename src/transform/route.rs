@@ -9,8 +9,12 @@ use gateway_api::apis::experimental::httproutes::{
 };
 use tracing::warn;
 
-use crate::apply::{managed_metadata_with, owner_labels};
+use crate::apply::{managed_metadata, managed_metadata_with, owner_labels};
 use crate::config::Config;
+use crate::envoy_gateway::{
+    HttpExtAuthService, SecurityPolicy, SecurityPolicyBackendRef, SecurityPolicyExtAuth,
+    SecurityPolicySpec, SecurityPolicyTargetRef,
+};
 use crate::pangolin::TraefikDynamicConfig;
 use crate::transform::Desired;
 use crate::transform::backend::BackendIndex;
@@ -58,10 +62,14 @@ pub fn build_routes(
             }
         };
 
+        let uses_badger =
+            middleware::references_badger(&router.middlewares, &dyn_config.http.middlewares);
+        let badger_handled_by_ext_auth = cfg.badger_ext_auth.is_some() && uses_badger;
         let filters = middleware::build_filters(
             router_name,
             &router.middlewares,
             &dyn_config.http.middlewares,
+            badger_handled_by_ext_auth,
         );
 
         let matches = parsed.path.as_ref().map(|p| {
@@ -144,8 +152,54 @@ pub fn build_routes(
             }
         }
 
+        if badger_handled_by_ext_auth && !is_terminating {
+            let policy = build_badger_security_policy(cfg, router_name, &route_name);
+            let policy_name = policy.metadata.name.clone().unwrap_or_default();
+            desired.security_policies.insert(policy_name, policy);
+        }
+
         desired.http_routes.insert(route_name, route);
     }
 
     index
+}
+
+fn build_badger_security_policy(
+    cfg: &Config,
+    router_name: &str,
+    route_name: &str,
+) -> SecurityPolicy {
+    let ext_auth = cfg
+        .badger_ext_auth
+        .as_ref()
+        .expect("badger ext auth checked by caller");
+    let name = prefixed_label("sp", router_name);
+    let labels = owner_labels(cfg, &name);
+
+    SecurityPolicy {
+        metadata: managed_metadata(cfg, &name, labels),
+        spec: SecurityPolicySpec {
+            target_refs: Some(vec![SecurityPolicyTargetRef {
+                group: "gateway.networking.k8s.io".into(),
+                kind: "HTTPRoute".into(),
+                name: route_name.to_string(),
+                section_name: None,
+            }]),
+            ext_auth: Some(SecurityPolicyExtAuth {
+                http: Some(HttpExtAuthService {
+                    backend_refs: vec![SecurityPolicyBackendRef {
+                        group: Some(String::new()),
+                        kind: Some("Service".into()),
+                        name: ext_auth.backend_name.clone(),
+                        namespace: ext_auth.backend_namespace.clone(),
+                        port: ext_auth.backend_port,
+                    }],
+                    path: ext_auth.path.clone(),
+                    headers_to_backend: Some(ext_auth.headers_to_backend.clone()),
+                }),
+                headers_to_ext_auth: Some(ext_auth.headers_to_ext_auth.clone()),
+                fail_open: Some(ext_auth.fail_open),
+            }),
+        },
+    }
 }

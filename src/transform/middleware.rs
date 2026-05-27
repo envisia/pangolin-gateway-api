@@ -24,6 +24,7 @@ pub fn build_filters(
     router: &str,
     middleware_names: &[String],
     middlewares: &BTreeMap<String, Middleware>,
+    badger_handled_by_ext_auth: bool,
 ) -> Vec<HttpRouteRulesFilters> {
     let mut filters = Vec::new();
     for name in middleware_names {
@@ -31,14 +32,29 @@ pub fn build_filters(
             warn!(router, middleware = %name, "router references missing middleware");
             continue;
         };
-        if let Some(filter) = translate(router, name, mw) {
+        if let Some(filter) = translate(router, name, mw, badger_handled_by_ext_auth) {
             filters.push(filter);
         }
     }
     filters
 }
 
-fn translate(router: &str, name: &str, mw: &Middleware) -> Option<HttpRouteRulesFilters> {
+pub fn references_badger(
+    middleware_names: &[String],
+    middlewares: &BTreeMap<String, Middleware>,
+) -> bool {
+    middleware_names
+        .iter()
+        .filter_map(|name| middlewares.get(name))
+        .any(is_badger_plugin)
+}
+
+fn translate(
+    router: &str,
+    name: &str,
+    mw: &Middleware,
+    badger_handled_by_ext_auth: bool,
+) -> Option<HttpRouteRulesFilters> {
     let obj = mw.as_object()?;
     // Pangolin emits one top-level key per middleware kind.
     let (kind, body) = obj.iter().next()?;
@@ -53,7 +69,9 @@ fn translate(router: &str, name: &str, mw: &Middleware) -> Option<HttpRouteRules
         }
         "stripPrefix" => translate_strip_prefix(body),
         "plugin" => {
-            warn!(router, middleware = %name, "plugin middlewares (e.g. badger) must be configured via Envoy Gateway policies; skipping");
+            if !(badger_handled_by_ext_auth && plugin_contains_badger(body)) {
+                warn!(router, middleware = %name, "plugin middlewares (e.g. badger) must be configured via Envoy Gateway policies; skipping");
+            }
             None
         }
         other => {
@@ -61,6 +79,17 @@ fn translate(router: &str, name: &str, mw: &Middleware) -> Option<HttpRouteRules
             None
         }
     }
+}
+
+fn is_badger_plugin(mw: &Middleware) -> bool {
+    mw.as_object()
+        .and_then(|obj| obj.get("plugin"))
+        .is_some_and(plugin_contains_badger)
+}
+
+fn plugin_contains_badger(body: &Value) -> bool {
+    body.as_object()
+        .is_some_and(|plugins| plugins.contains_key("badger"))
 }
 
 fn translate_redirect_scheme(body: &Value) -> Option<HttpRouteRulesFilters> {

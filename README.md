@@ -57,8 +57,10 @@ applies the additions/updates with [Server-Side Apply], and deletes orphans.
 | `middlewares.addPrefix`                  | HTTPRoute filter `URLRewrite{path.ReplacePrefixMatch}`                     |
 | `middlewares.replacePath`                | HTTPRoute filter `URLRewrite{path.ReplaceFullPath}`                        |
 | `middlewares.replacePathRegex`           | not in core Gateway API – logged + skipped                                 |
-| `middlewares.plugin.badger`              | pangolin's auth plugin – configure via Envoy Gateway `SecurityPolicy` instead |
-| `tcp.*` / `udp.*`                        | not yet handled (planned: `TCPRoute` / `UDPRoute`)                         |
+| `middlewares.plugin.badger`              | when `CONFIG_BADGER_EXT_AUTH=true`: per-route Envoy Gateway `SecurityPolicy.extAuth`; otherwise logged + skipped |
+| Pangolin dashboard host                  | optional static `HTTPRoute`s for Next.js (`:3002`) and API/WebSocket (`:3000`) when `CONFIG_PANGOLIN_DASHBOARD_HOST` is set |
+| Gerbil UDP ports                         | optional `UDPRoute`s + UDP listeners when `CONFIG_GERBIL_UDP_ROUTE=true`    |
+| `tcp.*` / other `udp.*` dynamic config   | logged + skipped                                                            |
 
 Unsupported rule constructs (`||` disjunction, `!` negation, `HostRegexp`,
 `Method`, `Headers`, …) cause the affected router to be **logged and skipped**
@@ -80,6 +82,70 @@ direct `Service` `backendRef` — the controller does not synthesize a duplicate
 
 Pick the default unless you specifically want FQDN backends or the `Backend`
 CRD's other features (health checking via `BackendTrafficPolicy`, etc.).
+
+## Badger external auth
+
+Gateway API cannot express Traefik plugins directly. When
+`CONFIG_BADGER_EXT_AUTH=true`, routers that reference Pangolin's `badger`
+plugin get a managed Envoy Gateway `SecurityPolicy` targeting the generated
+`HTTPRoute`.
+
+The policy must point at an HTTP service that speaks Envoy's ext_authz protocol.
+Pangolin's `/api/v1/badger/verify-session` endpoint expects Badger's JSON body,
+so in today's Pangolin releases this normally means running a small shim service
+that adapts Envoy's auth check request to Pangolin's badger verify-session API.
+The controller defaults to a Service named `pangolin-badger-ext-authz` on port
+`9002`; override that with the `CONFIG_BADGER_EXT_AUTH_*` settings.
+
+## Scoped reconcile
+
+Set `CONFIG_RECONCILE_ONLY` to a comma-separated allow-list to test a subset of
+objects without touching the rest of the controller-owned state. Entries can be
+plain names or `Kind/name`, for example:
+
+```sh
+CONFIG_RECONCILE_ONLY="HTTPRoute/hr-9-chris-connect-router,SecurityPolicy/sp-9-chris-connect-router"
+```
+
+Apply and GC both honor the scope. Objects outside the scope are left alone, and
+selected objects that are no longer desired can still be garbage-collected.
+
+## Migration config changes
+
+For a dual-stack rollout, keep Traefik active and add the Gateway API pieces in
+small steps:
+
+1. Deploy a badger ext_auth shim Service, then set:
+
+   ```sh
+   CONFIG_BADGER_EXT_AUTH=true
+   CONFIG_BADGER_EXT_AUTH_BACKEND_NAME=pangolin-badger-ext-authz
+   CONFIG_BADGER_EXT_AUTH_BACKEND_PORT=9002
+   ```
+
+2. Start with a narrow reconcile scope:
+
+   ```sh
+   CONFIG_RECONCILE_ONLY="HTTPRoute/hr-9-chris-connect-router,SecurityPolicy/sp-9-chris-connect-router"
+   ```
+
+3. To serve Pangolin itself through Envoy Gateway, expose the Pangolin Service
+   ports for API/WebSocket (`3000`) and Next.js (`3002`), then set:
+
+   ```sh
+   CONFIG_PANGOLIN_DASHBOARD_HOST=pangolin.example.com
+   ```
+
+4. To move Gerbil UDP traffic through Envoy Gateway, expose UDP ports on the
+   Gerbil Service and enable:
+
+   ```sh
+   CONFIG_GERBIL_UDP_ROUTE=true
+   CONFIG_GERBIL_UDP_PORTS=51820,21820
+   ```
+
+Remove `CONFIG_RECONCILE_ONLY` only after the selected route, policy, dashboard,
+and UDP paths have been validated against Envoy Gateway.
 
 ## Certificate handling with cert-manager
 
@@ -181,6 +247,25 @@ upstream Go controller (`CONFIG_*`) where the concepts overlap.
 | `CONFIG_BACKEND_KIND`              | `service`                                   | `service` (default) or `envoy-backend`. See [Backend strategy](#backend-strategy) |
 | `CONFIG_HTTPROUTE_ANNOTATIONS`     | _(unset)_                                   | `k=v,k=v` annotations stamped on every HTTPRoute. Typical: `cert-manager.io/cluster-issuer=letsencrypt-prod` |
 | `CONFIG_LISTENERSET_ANNOTATIONS`   | _(unset)_                                   | `k=v,k=v` annotations stamped on the ListenerSet                            |
+| `CONFIG_BADGER_EXT_AUTH`           | `false`                                     | Emit Envoy Gateway `SecurityPolicy.extAuth` for routes that use badger       |
+| `CONFIG_BADGER_EXT_AUTH_BACKEND_NAME` | `pangolin-badger-ext-authz`              | Service name of the Envoy ext_auth-compatible badger shim                   |
+| `CONFIG_BADGER_EXT_AUTH_BACKEND_NAMESPACE` | controller namespace                 | Namespace of the ext_auth backend Service                                   |
+| `CONFIG_BADGER_EXT_AUTH_BACKEND_PORT` | `9002`                                   | Service port for the ext_auth backend                                       |
+| `CONFIG_BADGER_EXT_AUTH_PATH`      | _(unset)_                                   | Optional fixed auth check path                                              |
+| `CONFIG_BADGER_EXT_AUTH_HEADERS_TO_EXTAUTH` | `authorization,cookie,x-forwarded-for,x-forwarded-host,x-forwarded-proto,x-real-ip,p-access-token-id,p-access-token` | Headers forwarded to the auth service |
+| `CONFIG_BADGER_EXT_AUTH_HEADERS_TO_BACKEND` | `remote-user,remote-email,remote-name,remote-role` | Headers copied from auth response to upstream backends          |
+| `CONFIG_BADGER_EXT_AUTH_FAIL_OPEN` | `false`                                     | Allow traffic if the auth service is unavailable                            |
+| `CONFIG_RECONCILE_ONLY`            | _(unset)_                                   | Optional comma-separated allow-list of `Kind/name` objects to apply/GC      |
+| `CONFIG_PANGOLIN_DASHBOARD_HOST`   | _(unset)_                                   | When set, emit static dashboard HTTPRoutes for this hostname                 |
+| `CONFIG_PANGOLIN_SERVICE_NAME`     | `pangolin`                                  | Service that backs the dashboard/API routes                                 |
+| `CONFIG_PANGOLIN_SERVICE_NAMESPACE`| controller namespace                        | Namespace of the Pangolin Service                                           |
+| `CONFIG_PANGOLIN_API_PORT`         | `3000`                                      | Pangolin API/WebSocket Service port                                         |
+| `CONFIG_PANGOLIN_NEXT_PORT`        | `3002`                                      | Pangolin Next.js Service port                                               |
+| `CONFIG_PANGOLIN_REDIRECT_HTTP_TO_HTTPS` | `true`                              | Emit an HTTP-to-HTTPS redirect route when HTTPS listeners are configured    |
+| `CONFIG_GERBIL_UDP_ROUTE`          | `false`                                     | Emit UDP listeners and UDPRoutes for Gerbil                                 |
+| `CONFIG_GERBIL_SERVICE_NAME`       | `gerbil`                                    | Service that backs Gerbil UDP traffic                                       |
+| `CONFIG_GERBIL_SERVICE_NAMESPACE`  | controller namespace                        | Namespace of the Gerbil Service                                             |
+| `CONFIG_GERBIL_UDP_PORTS`          | `51820,21820`                               | UDP ports to expose through the ListenerSet                                 |
 | `CONFIG_FIELD_MANAGER`             | `pangolin-gateway-controller`                 | Server-Side Apply field manager                                             |
 | `CONFIG_MANAGED_LABEL_KEY`         | `app.kubernetes.io/managed-by`              | Used for GC selector                                                        |
 | `CONFIG_MANAGED_LABEL_VALUE`       | `pangolin-gateway-controller`                 | Used for GC selector                                                        |

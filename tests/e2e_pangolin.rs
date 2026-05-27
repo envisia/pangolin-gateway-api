@@ -31,7 +31,7 @@ use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use pangolin_gateway_controller::config::{BackendKind, Config};
+use pangolin_gateway_controller::config::{BackendKind, Config, ReconcileScope};
 use pangolin_gateway_controller::{pangolin, reconcile};
 
 fn e2e_config(endpoint: &str, namespace: &str, parent_gateway: &str) -> Config {
@@ -67,6 +67,11 @@ fn e2e_config(endpoint: &str, namespace: &str, parent_gateway: &str) -> Config {
 
         httproute_annotations: BTreeMap::new(),
         listenerset_annotations: BTreeMap::new(),
+
+        badger_ext_auth: None,
+        pangolin_dashboard: None,
+        gerbil_udp: None,
+        reconcile_scope: ReconcileScope::all(),
 
         read_only: false,
         log_traefik_config: true,
