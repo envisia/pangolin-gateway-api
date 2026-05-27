@@ -10,14 +10,19 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::{info, warn};
 
-use crate::config::{Config, ReconcileKind};
+use crate::config::{Config, ReconcileKind, ReconcileScope};
 
-pub async fn sweep<T>(api: &Api<T>, cfg: &Config, desired_names: &BTreeSet<String>) -> Result<()>
+pub async fn sweep<T>(
+    api: &Api<T>,
+    cfg: &Config,
+    scope: &ReconcileScope,
+    desired_names: &BTreeSet<String>,
+) -> Result<()>
 where
     T: Resource<DynamicType = ()> + Clone + Serialize + DeserializeOwned + std::fmt::Debug,
 {
     let kind = ReconcileKind::parse(&T::kind(&()))?;
-    if !cfg.reconcile_scope.affects_kind(kind) {
+    if !scope.affects_kind(kind) {
         return Ok(());
     }
 
@@ -34,7 +39,7 @@ where
         if desired_names.contains(&name) {
             continue;
         }
-        if !cfg.reconcile_scope.includes(kind, &name) {
+        if !scope.includes(kind, &name) {
             continue;
         }
         if cfg.read_only {

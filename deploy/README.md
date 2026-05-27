@@ -76,7 +76,7 @@ that file for authoritative defaults.
 | `CONFIG_BADGER_EXT_AUTH` | `false` | Emit Envoy Gateway `SecurityPolicy.extAuth` for routes that use Pangolin's badger plugin. Requires an Envoy ext_auth-compatible shim service. |
 | `CONFIG_BADGER_EXT_AUTH_BACKEND_NAME` | `pangolin-badger-ext-authz` | Auth shim Service name. |
 | `CONFIG_BADGER_EXT_AUTH_BACKEND_PORT` | `9002` | Auth shim Service port. |
-| `CONFIG_RECONCILE_ONLY` | _(empty)_ | Optional comma-separated allow-list such as `HTTPRoute/hr-9-chris-connect-router`. |
+| `CONFIG_RECONCILE_ONLY` | _(empty)_ | Optional comma-separated allow-list of hostnames or object selectors such as `9-chris.example.com` or `HTTPRoute/hr-9-chris-connect-router`. |
 | `CONFIG_PANGOLIN_DASHBOARD_HOST` | _(empty)_ | Emit static dashboard/API/WebSocket HTTPRoutes for this host. |
 | `CONFIG_GERBIL_UDP_ROUTE` | `false` | Emit Gerbil UDP listeners and UDPRoutes; requires UDPRoute support in your Gateway implementation. |
 | `CONFIG_GERBIL_UDP_PORTS` | `51820,21820` | UDP ports to route to the Gerbil Service. |
@@ -124,7 +124,8 @@ Envoy HTTP ext_auth checks and calls
 ```
 
 During migration, combine this with `CONFIG_RECONCILE_ONLY` to apply a single
-route and policy first.
+hostname first. Hostname scopes expand to the matching `HTTPRoute`, badger
+`SecurityPolicy`, generated backend objects, and the shared `ListenerSet`.
 
 ## Configuration changes for migration
 
@@ -163,7 +164,7 @@ spec:
             - name: CONFIG_BADGER_EXT_AUTH_BACKEND_PORT
               value: "9002"
             - name: CONFIG_RECONCILE_ONLY
-              value: "HTTPRoute/hr-9-chris-connect-router,SecurityPolicy/sp-9-chris-connect-router"
+              value: "9-chris.example.com"
             - name: CONFIG_PANGOLIN_DASHBOARD_HOST
               value: "pangolin.example.com"
             - name: CONFIG_GERBIL_UDP_ROUTE
@@ -171,8 +172,10 @@ spec:
 ```
 
 For the first test, keep `CONFIG_RECONCILE_ONLY` narrow. Remove it only after the
-selected `HTTPRoute` and `SecurityPolicy` are accepted by Envoy Gateway and the
-auth shim returns the expected allow/redirect/deny responses.
+selected hostname's `HTTPRoute` and `SecurityPolicy` are accepted by Envoy
+Gateway and the auth shim returns the expected allow/redirect/deny responses.
+For Gerbil's old-IP plus Envoy-IP migration pattern, see
+[`docs/gerbil-gateway-migration.md`](../docs/gerbil-gateway-migration.md).
 
 ## Embedding from another kustomization
 

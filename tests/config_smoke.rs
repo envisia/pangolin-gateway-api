@@ -108,6 +108,21 @@ fn reconcile_scope_parses_selectors() {
 }
 
 #[test]
+fn reconcile_scope_treats_bare_names_as_hostname_candidates() {
+    let scope = ReconcileScope::parse("app.example.com,Hostname:admin.example.com").unwrap();
+
+    assert!(scope.includes(ReconcileKind::HttpRoute, "app.example.com"));
+    assert!(!scope.includes(ReconcileKind::HttpRoute, "admin.example.com"));
+    assert_eq!(
+        scope.hostname_candidates(),
+        vec![
+            "app.example.com".to_string(),
+            "admin.example.com".to_string()
+        ]
+    );
+}
+
+#[test]
 fn from_env_smoke() {
     // Step 1: missing CONFIG_ENDPOINT → required-env error.
     clear_all();

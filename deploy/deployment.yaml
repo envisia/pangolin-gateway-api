@@ -62,9 +62,9 @@ spec:
             #   value: "pangolin-badger-ext-authz"
             # - name: CONFIG_BADGER_EXT_AUTH_BACKEND_PORT
             #   value: "9002"
-            # Test-mode reconcile scope (optional), e.g. only one generated route.
+            # Test-mode reconcile scope (optional), e.g. only one hostname.
             # - name: CONFIG_RECONCILE_ONLY
-            #   value: "HTTPRoute/hr-9-chris-connect-router"
+            #   value: "9-chris.example.com"
             # Pangolin dashboard through Gateway API (optional).
             # - name: CONFIG_PANGOLIN_DASHBOARD_HOST
             #   value: "pangolin.example.com"

@@ -100,12 +100,18 @@ The controller defaults to a Service named `pangolin-badger-ext-authz` on port
 ## Scoped reconcile
 
 Set `CONFIG_RECONCILE_ONLY` to a comma-separated allow-list to test a subset of
-objects without touching the rest of the controller-owned state. Entries can be
-plain names or `Kind/name`, for example:
+objects without touching the rest of the controller-owned state. The easiest
+form is a hostname; the controller expands it to the matching `HTTPRoute`, its
+badger `SecurityPolicy`, generated backend objects, and the shared
+`ListenerSet`:
 
 ```sh
-CONFIG_RECONCILE_ONLY="HTTPRoute/hr-9-chris-connect-router,SecurityPolicy/sp-9-chris-connect-router"
+CONFIG_RECONCILE_ONLY="9-chris.example.com"
 ```
+
+Explicit object selectors still work as `Kind/name` or `Kind:name`, for example
+`HTTPRoute/hr-9-chris-connect-router`. Use `Hostname/name` if you need to force
+a hostname selector that does not contain a dot.
 
 Apply and GC both honor the scope. Objects outside the scope are left alone, and
 selected objects that are no longer desired can still be garbage-collected.
@@ -126,7 +132,7 @@ small steps:
 2. Start with a narrow reconcile scope:
 
    ```sh
-   CONFIG_RECONCILE_ONLY="HTTPRoute/hr-9-chris-connect-router,SecurityPolicy/sp-9-chris-connect-router"
+   CONFIG_RECONCILE_ONLY="9-chris.example.com"
    ```
 
 3. To serve Pangolin itself through Envoy Gateway, expose the Pangolin Service
@@ -146,6 +152,10 @@ small steps:
 
 Remove `CONFIG_RECONCILE_ONLY` only after the selected route, policy, dashboard,
 and UDP paths have been validated against Envoy Gateway.
+
+For the Gerbil public-IP migration pattern, including direct old-IP traffic plus
+a separate Envoy Gateway IP, see
+[docs/gerbil-gateway-migration.md](docs/gerbil-gateway-migration.md).
 
 ## Certificate handling with cert-manager
 
@@ -255,7 +265,7 @@ upstream Go controller (`CONFIG_*`) where the concepts overlap.
 | `CONFIG_BADGER_EXT_AUTH_HEADERS_TO_EXTAUTH` | `authorization,cookie,x-forwarded-for,x-forwarded-host,x-forwarded-proto,x-real-ip,p-access-token-id,p-access-token` | Headers forwarded to the auth service |
 | `CONFIG_BADGER_EXT_AUTH_HEADERS_TO_BACKEND` | `remote-user,remote-email,remote-name,remote-role` | Headers copied from auth response to upstream backends          |
 | `CONFIG_BADGER_EXT_AUTH_FAIL_OPEN` | `false`                                     | Allow traffic if the auth service is unavailable                            |
-| `CONFIG_RECONCILE_ONLY`            | _(unset)_                                   | Optional comma-separated allow-list of `Kind/name` objects to apply/GC      |
+| `CONFIG_RECONCILE_ONLY`            | _(unset)_                                   | Optional comma-separated allow-list of hostnames or `Kind/name` objects to apply/GC |
 | `CONFIG_PANGOLIN_DASHBOARD_HOST`   | _(unset)_                                   | When set, emit static dashboard HTTPRoutes for this hostname                 |
 | `CONFIG_PANGOLIN_SERVICE_NAME`     | `pangolin`                                  | Service that backs the dashboard/API routes                                 |
 | `CONFIG_PANGOLIN_SERVICE_NAMESPACE`| controller namespace                        | Namespace of the Pangolin Service                                           |

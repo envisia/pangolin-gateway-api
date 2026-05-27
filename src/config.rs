@@ -102,12 +102,16 @@ pub struct ReconcileScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ReconcileSelector {
-    kind: Option<ReconcileKind>,
-    name: String,
+enum ReconcileSelector {
+    Object {
+        kind: Option<ReconcileKind>,
+        name: String,
+    },
+    Hostname(String),
+    ObjectNameOrHostname(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReconcileKind {
     HttpRoute,
     ListenerSet,
@@ -157,21 +161,39 @@ impl ReconcileScope {
                 continue;
             }
 
-            let (kind, name) = if let Some((kind, name)) = entry.split_once('/') {
-                (Some(ReconcileKind::parse(kind.trim())?), name.trim())
+            let selector = if let Some((kind, name)) = entry.split_once('/') {
+                let kind = kind.trim();
+                let name = name.trim();
+                if name.is_empty() {
+                    bail!("CONFIG_RECONCILE_ONLY entry {entry:?} has an empty selector value");
+                }
+                if is_hostname_selector_kind(kind) {
+                    ReconcileSelector::Hostname(normalize_hostname_selector(name))
+                } else {
+                    ReconcileSelector::Object {
+                        kind: Some(ReconcileKind::parse(kind)?),
+                        name: name.to_string(),
+                    }
+                }
             } else if let Some((kind, name)) = entry.split_once(':') {
-                (Some(ReconcileKind::parse(kind.trim())?), name.trim())
+                let kind = kind.trim();
+                let name = name.trim();
+                if name.is_empty() {
+                    bail!("CONFIG_RECONCILE_ONLY entry {entry:?} has an empty selector value");
+                }
+                if is_hostname_selector_kind(kind) {
+                    ReconcileSelector::Hostname(normalize_hostname_selector(name))
+                } else {
+                    ReconcileSelector::Object {
+                        kind: Some(ReconcileKind::parse(kind)?),
+                        name: name.to_string(),
+                    }
+                }
             } else {
-                (None, entry)
+                ReconcileSelector::ObjectNameOrHostname(entry.to_string())
             };
 
-            if name.is_empty() {
-                bail!("CONFIG_RECONCILE_ONLY entry {entry:?} has an empty object name");
-            }
-            selectors.push(ReconcileSelector {
-                kind,
-                name: name.to_string(),
-            });
+            selectors.push(selector);
         }
         Ok(Self { selectors })
     }
@@ -187,16 +209,66 @@ impl ReconcileScope {
     pub fn includes(&self, kind: ReconcileKind, name: &str) -> bool {
         self.is_all()
             || self.selectors.iter().any(|selector| {
-                selector.kind.is_none_or(|selected| selected == kind) && selector.name == name
+                matches!(
+                    selector,
+                    ReconcileSelector::Object {
+                        kind: selected,
+                        name: selected_name,
+                    } if selected.is_none_or(|selected| selected == kind) && selected_name == name
+                ) || matches!(
+                    selector,
+                    ReconcileSelector::ObjectNameOrHostname(selected_name)
+                        if selected_name == name
+                )
             })
     }
 
     pub fn affects_kind(&self, kind: ReconcileKind) -> bool {
         self.is_all()
-            || self
-                .selectors
-                .iter()
-                .any(|selector| selector.kind.is_none_or(|selected| selected == kind))
+            || self.selectors.iter().any(|selector| match selector {
+                ReconcileSelector::Object { kind: selected, .. } => {
+                    selected.is_none_or(|selected| selected == kind)
+                }
+                ReconcileSelector::ObjectNameOrHostname(_) => true,
+                ReconcileSelector::Hostname(_) => false,
+            })
+    }
+
+    pub fn hostname_candidates(&self) -> Vec<String> {
+        self.selectors
+            .iter()
+            .filter_map(|selector| match selector {
+                ReconcileSelector::Hostname(hostname) => {
+                    Some(normalize_hostname_selector(hostname))
+                }
+                ReconcileSelector::ObjectNameOrHostname(hostname) => {
+                    looks_like_hostname_selector(hostname)
+                        .then(|| normalize_hostname_selector(hostname))
+                }
+                ReconcileSelector::Object { .. } => None,
+            })
+            .collect()
+    }
+
+    pub fn with_expanded_objects<I>(&self, objects: I) -> Self
+    where
+        I: IntoIterator<Item = (ReconcileKind, String)>,
+    {
+        let mut selectors: Vec<_> = self
+            .selectors
+            .iter()
+            .filter(|selector| !matches!(selector, ReconcileSelector::Hostname(_)))
+            .cloned()
+            .collect();
+        selectors.extend(
+            objects
+                .into_iter()
+                .map(|(kind, name)| ReconcileSelector::Object {
+                    kind: Some(kind),
+                    name,
+                }),
+        );
+        Self { selectors }
     }
 }
 
@@ -479,6 +551,21 @@ fn normalize_kind(s: &str) -> String {
         .filter(|c| *c != '-' && *c != '_' && !c.is_whitespace())
         .collect::<String>()
         .to_ascii_lowercase()
+}
+
+fn is_hostname_selector_kind(kind: &str) -> bool {
+    matches!(
+        normalize_kind(kind).as_str(),
+        "host" | "hosts" | "hostname" | "hostnames"
+    )
+}
+
+fn normalize_hostname_selector(hostname: &str) -> String {
+    hostname.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn looks_like_hostname_selector(hostname: &str) -> bool {
+    hostname.contains('.')
 }
 
 /// Parse a `key=value,key=value,...` list. Empty entries are skipped.
