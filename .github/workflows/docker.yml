@@ -27,7 +27,7 @@ jobs:
   build:
     name: build & publish
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write       # push to ghcr.io
@@ -87,12 +87,12 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=pangolin-gateway-controller-amd64
+          cache-to: type=gha,mode=max,scope=pangolin-gateway-controller-amd64
           # Generate SBOM + SLSA provenance during the build. They land both on
           # the registry (as referrers) and on the workflow run.
           sbom: true
