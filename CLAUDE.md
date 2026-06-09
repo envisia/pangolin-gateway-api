@@ -115,9 +115,18 @@ selector and deletes names not present in the corresponding desired map.
     synthesized names get a `-tcp-`/`-udp-` infix and the right port protocol.
   - `middleware.rs` — small allow-list mapping `redirectScheme`, `headers`,
     `addPrefix`, `replacePath`, `stripPrefix` to Gateway API filters.
-    `replacePathRegex` and pangolin's `badger` plugin are intentionally skipped.
+    `replacePathRegex` is intentionally skipped. `requires_badger_auth` detects
+    pangolin's `badger` auth plugin — it is never a filter; auth is decided
+    per-route (see below).
   - `route.rs` — one `HTTPRoute` per pangolin router, parentRef = our
-    `ListenerSet`.
+    `ListenerSet`. Badger-protected routers (pangolin attaches badger to every
+    non-redirect router) are: wired to a `SecurityPolicy` when
+    `CONFIG_EXT_AUTHZ_SERVICE` is set, emitted bare when
+    `CONFIG_ALLOW_UNAUTHENTICATED_ROUTES=true`, and **skipped otherwise** —
+    never silently exposed without auth.
+  - `ext_authz.rs` — builds the Envoy Gateway `SecurityPolicy` (extAuth.http,
+    `failOpen: false`) per protected route; the policy name derives from the
+    route name so their GC stays in lockstep.
   - `l4.rs` — raw TCP/UDP resources → `TCPRoute`/`UDPRoute` plus `TCP`/`UDP`
     listeners (gated on `CONFIG_ENABLE_TCP_ROUTES`/`CONFIG_ENABLE_UDP_ROUTES`,
     both off by default). Port comes from the entrypoint name (`tcp-234`). Only
@@ -134,14 +143,16 @@ selector and deletes names not present in the corresponding desired map.
   Every applied object gets the managed/instance labels and managed annotation;
   HTTPRoute and ListenerSet additionally get any user-configured annotations.
 - `src/envoy_gateway.rs` — hand-rolled bindings for Envoy Gateway's
-  `Backend` CRD (`gateway.envoyproxy.io/v1alpha1`). The `gateway-api` crate
-  doesn't ship these. Add new Envoy Gateway-specific CRDs here too.
+  `Backend` and `SecurityPolicy` CRDs (`gateway.envoyproxy.io/v1alpha1`). The
+  `gateway-api` crate doesn't ship these. Add new Envoy Gateway-specific CRDs
+  here too.
 - `src/gc.rs` — generic sweep over `Api<T>` by the managed-by selector.
 - `src/reconcile.rs` — outer loop: fetch → if changed transform+apply+gc → wait.
   Apply order is `Service → EndpointSlice → Backend → ListenerSet → HTTPRoute →
-  TCPRoute → UDPRoute`. GC happens after every successful apply round. The
-  `Backend` sweep is gated on `cfg.backend_kind == EnvoyBackend`, and the
-  TCPRoute/UDPRoute sweeps on their enable flags — the CRDs may not even be
+  TCPRoute → UDPRoute → SecurityPolicy`. GC happens after every successful
+  apply round. The `Backend` sweep is gated on `cfg.backend_kind ==
+  EnvoyBackend`, the TCPRoute/UDPRoute sweeps on their enable flags, and the
+  SecurityPolicy sweep on `cfg.ext_authz.is_some()` — the CRDs may not even be
   installed otherwise, so we don't list them.
 
 ## Configurable annotation hook

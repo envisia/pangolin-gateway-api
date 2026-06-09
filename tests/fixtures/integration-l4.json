@@ -1,0 +1,56 @@
+{
+  "http": {
+    "routers": {
+      "web-router": {
+        "entryPoints": ["web"],
+        "rule": "Host(`web.integration.local`)",
+        "service": "web-service",
+        "priority": 100
+      }
+    },
+    "services": {
+      "web-service": {
+        "loadBalancer": {
+          "servers": [
+            { "url": "http://example-backend.default.svc.cluster.local:80" }
+          ]
+        }
+      }
+    }
+  },
+  "tcp": {
+    "routers": {
+      "2-raw-router": {
+        "entryPoints": ["tcp-2345"],
+        "service": "2-raw-service",
+        "rule": "HostSNI(`*`)"
+      }
+    },
+    "services": {
+      "2-raw-service": {
+        "loadBalancer": {
+          "servers": [
+            { "address": "tcp-backend.default.svc.cluster.local:5432" }
+          ]
+        }
+      }
+    }
+  },
+  "udp": {
+    "routers": {
+      "3-udp-router": {
+        "entryPoints": ["udp-5353"],
+        "service": "3-udp-service"
+      }
+    },
+    "services": {
+      "3-udp-service": {
+        "loadBalancer": {
+          "servers": [
+            { "address": "http://10.0.0.53:5353" }
+          ]
+        }
+      }
+    }
+  }
+}

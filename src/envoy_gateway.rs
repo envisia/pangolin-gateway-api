@@ -46,3 +46,66 @@ pub struct BackendFqdn {
     pub hostname: String,
     pub port: i32,
 }
+
+/// `gateway.envoyproxy.io/v1alpha1/SecurityPolicy` — only the `extAuth.http`
+/// surface we emit for pangolin's badger-protected routers. The external auth
+/// service is expected to translate Envoy's check request into pangolin's
+/// badger session verification (and reply with a redirect to the auth portal
+/// when the session is missing/invalid).
+#[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq)]
+#[kube(
+    group = "gateway.envoyproxy.io",
+    version = "v1alpha1",
+    kind = "SecurityPolicy",
+    plural = "securitypolicies",
+    namespaced
+)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityPolicySpec {
+    /// One entry per HTTPRoute the policy protects. We emit exactly one.
+    pub target_refs: Vec<PolicyTargetRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext_auth: Option<ExtAuth>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq)]
+pub struct PolicyTargetRef {
+    pub group: String,
+    pub kind: String,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtAuth {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<HttpExtAuthService>,
+    /// Client request headers forwarded to the auth service in addition to
+    /// Envoy's defaults (we always include the session cookie).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers_to_ext_auth: Option<Vec<String>>,
+    /// `false` (our hardcoded value): an unreachable auth service denies
+    /// requests rather than letting them through unauthenticated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_open: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpExtAuthService {
+    pub backend_refs: Vec<ExtAuthBackendRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Auth-service response headers copied onto the upstream request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers_to_backend: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq)]
+pub struct ExtAuthBackendRef {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<i32>,
+}

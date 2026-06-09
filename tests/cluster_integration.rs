@@ -25,6 +25,8 @@ use std::time::Duration;
 
 use gateway_api::apis::experimental::httproutes::HTTPRoute;
 use gateway_api::apis::experimental::listenersets::ListenerSet;
+use gateway_api::apis::experimental::tcproutes::TCPRoute;
+use gateway_api::apis::experimental::udproutes::UDPRoute;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::Resource;
@@ -69,6 +71,8 @@ fn integration_config(
         enable_tcp_routes: false,
         enable_udp_routes: false,
         backend_kind,
+        ext_authz: None,
+        allow_unauthenticated_routes: false,
         tls_secret_template: None,
         tls_secret_namespace: None,
 
@@ -214,6 +218,105 @@ async fn controller_reconciles_service_backends() {
         1,
         "expected exactly one synthesized EndpointSlice"
     );
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a real cluster + mock pangolin; see .github/workflows/integration.yml"]
+async fn controller_reconciles_l4_routes() {
+    let endpoint = env("INTEGRATION_PANGOLIN_URL");
+    let namespace = env("INTEGRATION_NAMESPACE");
+    let parent_gateway =
+        std::env::var("INTEGRATION_PARENT_GATEWAY").unwrap_or_else(|_| "eg".into());
+
+    let kube_client = kube::Client::try_default()
+        .await
+        .expect("connect to Kubernetes API (is KUBECONFIG set?)");
+
+    let mut cfg = integration_config(
+        &endpoint,
+        &namespace,
+        &parent_gateway,
+        BackendKind::Service,
+        "l4",
+    );
+    cfg.enable_tcp_routes = true;
+    cfg.enable_udp_routes = true;
+    let pang_client = pangolin::Client::new(&cfg).expect("build pangolin client");
+
+    let shutdown = CancellationToken::new();
+    let handle = {
+        let cfg = cfg.clone();
+        let kube_client = kube_client.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(
+            async move { reconcile::run_loop(cfg, kube_client, pang_client, shutdown).await },
+        )
+    };
+
+    let route_api: Api<HTTPRoute> = Api::namespaced(kube_client.clone(), &namespace);
+    let ls_api: Api<ListenerSet> = Api::namespaced(kube_client.clone(), &namespace);
+    let tcp_api: Api<TCPRoute> = Api::namespaced(kube_client.clone(), &namespace);
+    let udp_api: Api<UDPRoute> = Api::namespaced(kube_client.clone(), &namespace);
+    let svc_api: Api<Service> = Api::namespaced(kube_client.clone(), &namespace);
+    let eps_api: Api<EndpointSlice> = Api::namespaced(kube_client.clone(), &namespace);
+
+    let selector = cfg.managed_selector();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+
+    // L4 routes are last in the apply order; once they land everything else did.
+    let tcp_routes = wait_for_at_least(&tcp_api, &selector, 1, deadline, "TCPRoute").await;
+    let udp_routes = wait_for_at_least(&udp_api, &selector, 1, deadline, "UDPRoute").await;
+    let http_routes = wait_for_at_least(&route_api, &selector, 1, deadline, "HTTPRoute").await;
+    let listener_sets = wait_for_at_least(&ls_api, &selector, 1, deadline, "ListenerSet").await;
+    // The UDP router targets an IP, so service mode synthesizes a UDP stub.
+    let services = wait_for_at_least(&svc_api, &selector, 1, deadline, "Service").await;
+    let endpoint_slices =
+        wait_for_at_least(&eps_api, &selector, 1, deadline, "EndpointSlice").await;
+
+    println!("TCPRoutes:      {tcp_routes:?}");
+    println!("UDPRoutes:      {udp_routes:?}");
+    println!("HTTPRoutes:     {http_routes:?}");
+    println!("ListenerSets:   {listener_sets:?}");
+    println!("Services:       {services:?}");
+    println!("EndpointSlices: {endpoint_slices:?}");
+
+    assert_eq!(tcp_routes.len(), 1);
+    assert_eq!(udp_routes.len(), 1);
+    assert_eq!(http_routes.len(), 1);
+    assert_eq!(listener_sets.len(), 1);
+
+    let lp = ListParams::default().labels(&selector);
+
+    // The API server accepted the L4 listeners — verify protocol/port landed.
+    let ls = &ls_api.list(&lp).await.expect("list ListenerSets").items[0];
+    let tcp_listener = ls
+        .spec
+        .listeners
+        .iter()
+        .find(|l| l.protocol == "TCP")
+        .expect("TCP listener");
+    assert_eq!(tcp_listener.port, 2345);
+    let udp_listener = ls
+        .spec
+        .listeners
+        .iter()
+        .find(|l| l.protocol == "UDP")
+        .expect("UDP listener");
+    assert_eq!(udp_listener.port, 5353);
+
+    // TCPRoute attaches to its listener by sectionName.
+    let tcp = &tcp_api.list(&lp).await.expect("list TCPRoutes").items[0];
+    let parents = tcp.spec.parent_refs.as_ref().expect("parentRefs");
+    assert_eq!(parents[0].kind.as_deref(), Some("ListenerSet"));
+    assert_eq!(parents[0].section_name.as_deref(), Some("tcp-2345"));
+
+    // The synthesized UDP backend stub carries the UDP port protocol.
+    let svc = &svc_api.list(&lp).await.expect("list Services").items[0];
+    let port = &svc.spec.as_ref().unwrap().ports.as_ref().unwrap()[0];
+    assert_eq!(port.protocol.as_deref(), Some("UDP"));
 
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;

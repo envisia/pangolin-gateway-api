@@ -16,7 +16,7 @@ use tracing::{error, info, warn};
 
 use crate::apply::ssa_apply;
 use crate::config::{BackendKind, Config};
-use crate::envoy_gateway::Backend as EnvoyBackend;
+use crate::envoy_gateway::{Backend as EnvoyBackend, SecurityPolicy};
 use crate::gc;
 use crate::pangolin::{Client as PangClient, FetchOutcome};
 use crate::transform::{Desired, build_desired};
@@ -108,6 +108,7 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     let be_api: Api<EnvoyBackend> = Api::namespaced(kube_client.clone(), ns);
     let tcp_api: Api<TCPRoute> = Api::namespaced(kube_client.clone(), ns);
     let udp_api: Api<UDPRoute> = Api::namespaced(kube_client.clone(), ns);
+    let sp_api: Api<SecurityPolicy> = Api::namespaced(kube_client.clone(), ns);
 
     // Apply backends first so HTTPRoute backendRefs resolve immediately.
     for svc in desired.services.values() {
@@ -132,6 +133,10 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     for route in desired.udp_routes.values() {
         ssa_apply(&udp_api, cfg, route).await?;
     }
+    // Policies last: they reference routes that must already exist.
+    for sp in desired.security_policies.values() {
+        ssa_apply(&sp_api, cfg, sp).await?;
+    }
 
     // GC anything we own that's no longer wanted.
     let route_names: BTreeSet<String> = desired.http_routes.keys().cloned().collect();
@@ -141,6 +146,7 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     let be_names: BTreeSet<String> = desired.envoy_backends.keys().cloned().collect();
     let tcp_names: BTreeSet<String> = desired.tcp_routes.keys().cloned().collect();
     let udp_names: BTreeSet<String> = desired.udp_routes.keys().cloned().collect();
+    let sp_names: BTreeSet<String> = desired.security_policies.keys().cloned().collect();
 
     if let Err(e) = gc::sweep(&route_api, cfg, &route_names).await {
         warn!(error = ?e, "GC HTTPRoute failed");
@@ -172,6 +178,14 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
         && let Err(e) = gc::sweep(&udp_api, cfg, &udp_names).await
     {
         warn!(error = ?e, "GC UDPRoute failed");
+    }
+    // SecurityPolicy is an Envoy Gateway CRD; only list it when ext-authz is
+    // configured. Un-configuring ext-authz leaves stale policies behind —
+    // delete them manually (or via the managed-by label) in that case.
+    if cfg.ext_authz.is_some()
+        && let Err(e) = gc::sweep(&sp_api, cfg, &sp_names).await
+    {
+        warn!(error = ?e, "GC SecurityPolicy failed");
     }
     Ok(())
 }

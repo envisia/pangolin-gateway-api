@@ -60,6 +60,26 @@ spec:
               value: "true"
             - name: CONFIG_ENABLE_UDP_ROUTES
               value: "false"
+            # --- authentication for badger-protected resources ---
+            # Pangolin attaches its `badger` auth plugin to every resource
+            # router. Envoy can't run Traefik plugins, so protected routers are
+            # SKIPPED unless one of the following is configured:
+            #
+            # (a) An ext-authz service speaking Envoy's HTTP external
+            #     authorization protocol that verifies pangolin sessions. The
+            #     controller then emits a SecurityPolicy per protected route:
+            # - name: CONFIG_EXT_AUTHZ_SERVICE
+            #   value: "pangolin-badger-shim"
+            # - name: CONFIG_EXT_AUTHZ_PORT
+            #   value: "9001"
+            # - name: CONFIG_EXT_AUTHZ_PATH
+            #   value: "/verify"
+            #
+            # (b) The dangerous escape hatch: expose protected resources
+            #     WITHOUT authentication. Only for setups where every pangolin
+            #     resource is intentionally public:
+            # - name: CONFIG_ALLOW_UNAUTHENTICATED_ROUTES
+            #   value: "true"
             # cert-manager wiring (optional). Annotations are forwarded as-is to the
             # objects the controller creates; cert-manager's gateway-shim then mints
             # the Secret referenced by the template above.

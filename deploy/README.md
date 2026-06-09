@@ -76,6 +76,8 @@ that file for authoritative defaults.
 | `CONFIG_ENABLE_HTTPS_LISTENERS` | `false` | Whether to add HTTPS listeners to the `ListenerSet`. |
 | `CONFIG_ENABLE_TCP_ROUTES` | `false` | Translate pangolin's raw TCP resources into `TCPRoute`s + `TCP` listeners. Each `tcp-<port>` entrypoint becomes a port on the Envoy LoadBalancer Service. |
 | `CONFIG_ENABLE_UDP_ROUTES` | `false` | Same for raw UDP resources / `UDPRoute`. The cloud LB must support mixed TCP+UDP Services; if it doesn't, leave this off. |
+| `CONFIG_EXT_AUTHZ_SERVICE` | _(unset)_ | Service name of an Envoy ext-authz endpoint verifying pangolin sessions. When set, badger-protected routes get a `SecurityPolicy`; when unset they are **skipped**. |
+| `CONFIG_ALLOW_UNAUTHENTICATED_ROUTES` | `false` | **Dangerous.** Emit badger-protected routes without authentication. |
 | `CONFIG_TLS_SECRET_TEMPLATE` | _(unset)_ | Required when HTTPS listeners are on. Supports `{hostname}` and `{hostname-dashed}` placeholders. |
 | `CONFIG_HTTPROUTE_ANNOTATIONS` | _(empty)_ | `k=v,k=v` annotations stamped onto every `HTTPRoute`. Typical use: cert-manager cluster-issuer. |
 | `CONFIG_LISTENERSET_ANNOTATIONS` | _(empty)_ | Same for `ListenerSet`. |
@@ -131,6 +133,43 @@ patches:
 
 Then set `namespace:` in the consuming overlay to rewrite the ServiceAccount and
 Deployment namespaces (and the ClusterRoleBinding's `subjects[].namespace`).
+
+## Cross-namespace backends need a ReferenceGrant
+
+This is **not** an RBAC matter, and the controller deliberately does not create
+these for you. When a pangolin target resolves to a Service in *another*
+namespace (`<svc>.<ns>.svc.cluster.local` pass-through), Gateway API requires a
+`ReferenceGrant` in the **target** namespace before Envoy Gateway will resolve
+the `backendRef`. The grant is a consent object owned by the target namespace —
+auto-creating it from the controller would defeat its purpose. One grant per
+backend namespace:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-pangolin-routes
+  namespace: dummyservices        # the namespace the backend Service lives in
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: pangolin-system  # where the controller writes its routes
+    - group: gateway.networking.k8s.io
+      kind: TCPRoute
+      namespace: pangolin-system
+    - group: gateway.networking.k8s.io
+      kind: UDPRoute
+      namespace: pangolin-system
+  to:
+    - group: ""
+      kind: Service
+```
+
+Routes whose backendRef is rejected for a missing grant show it in their
+`status.parents[].conditions` (`ResolvedRefs: RefNotPermitted`). The same
+applies to `CONFIG_EXT_AUTHZ_NAMESPACE` if the ext-authz Service lives outside
+the controller namespace.
 
 ## GC behaviour worth knowing
 

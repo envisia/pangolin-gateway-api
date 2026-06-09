@@ -35,6 +35,11 @@ fn test_config() -> Config {
         enable_tcp_routes: true,
         enable_udp_routes: true,
         backend_kind: BackendKind::Service,
+        ext_authz: None,
+        // The upstream fixtures attach badger to every non-redirect router;
+        // keep them flowing through the pipeline. Auth-gating behaviour has
+        // its own dedicated tests below.
+        allow_unauthenticated_routes: true,
         tls_secret_template: Some("{hostname-dashed}-tls".into()),
         tls_secret_namespace: None,
         field_manager: "pangolin-gateway-controller".into(),
@@ -442,6 +447,147 @@ fn l4_concrete_sni_router_is_skipped() {
     );
     let ls = desired.listener_sets.values().next().expect("listener set");
     assert!(ls.spec.listeners.iter().all(|l| l.protocol != "TCP"));
+}
+
+/// Minimal config with one badger-protected router and one redirect router —
+/// the shape real pangolin emits for an HTTP resource.
+fn badger_fixture() -> TraefikDynamicConfig {
+    serde_json::from_value(json!({
+        "http": {
+            "routers": {
+                "1-app-router": {
+                    "rule": "Host(`app.example.com`)",
+                    "service": "app-service",
+                    "entryPoints": ["websecure"],
+                    "middlewares": ["badger"]
+                },
+                "1-app-router-redirect": {
+                    "rule": "Host(`app.example.com`)",
+                    "service": "app-service",
+                    "entryPoints": ["web"],
+                    "middlewares": ["redirect-to-https"]
+                }
+            },
+            "services": {
+                "app-service": {
+                    "loadBalancer": { "servers": [{ "url": "http://10.0.0.7:8080" }] }
+                }
+            },
+            "middlewares": {
+                "redirect-to-https": { "redirectScheme": { "scheme": "https" } },
+                "badger": {
+                    "plugin": {
+                        "badger": {
+                            "apiBaseUrl": "http://pangolin.pangolin-system.svc.cluster.local:3001/api/v1",
+                            "userSessionCookieName": "p_session_token"
+                        }
+                    }
+                }
+            }
+        }
+    }))
+    .unwrap()
+}
+
+#[test]
+fn protected_router_skipped_without_ext_authz() {
+    let mut cfg = test_config();
+    cfg.allow_unauthenticated_routes = false; // the production default
+    let desired = build_desired(&cfg, &badger_fixture());
+
+    // The badger-protected router must be dropped; the redirect router (no
+    // auth — it only bounces to HTTPS) still emits.
+    assert_eq!(
+        desired.http_routes.len(),
+        1,
+        "only the redirect route may be emitted: {:?}",
+        desired.http_routes.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        desired
+            .http_routes
+            .keys()
+            .all(|name| name.contains("redirect")),
+        "the protected route leaked through"
+    );
+    assert!(desired.security_policies.is_empty());
+}
+
+#[test]
+fn protected_router_emitted_with_override() {
+    let mut cfg = test_config();
+    cfg.allow_unauthenticated_routes = true;
+    let desired = build_desired(&cfg, &badger_fixture());
+
+    assert_eq!(desired.http_routes.len(), 2);
+    assert!(desired.security_policies.is_empty());
+}
+
+#[test]
+fn ext_authz_emits_security_policy_for_protected_route() {
+    use pangolin_gateway_controller::config::ExtAuthzConfig;
+
+    let mut cfg = test_config();
+    cfg.allow_unauthenticated_routes = false;
+    cfg.ext_authz = Some(ExtAuthzConfig {
+        service: "badger-shim".into(),
+        namespace: None,
+        port: 9001,
+        path: Some("/verify".into()),
+        headers_to_ext_auth: vec!["cookie".into(), "authorization".into()],
+        headers_to_backend: vec![],
+    });
+    let desired = build_desired(&cfg, &badger_fixture());
+
+    // Both routes emit; only the protected one gets a SecurityPolicy.
+    assert_eq!(desired.http_routes.len(), 2);
+    assert_eq!(desired.security_policies.len(), 1);
+
+    let sp = desired.security_policies.values().next().unwrap();
+    let target = &sp.spec.target_refs[0];
+    assert_eq!(target.kind, "HTTPRoute");
+    assert!(
+        desired.http_routes.contains_key(&target.name),
+        "policy must target an emitted route, got {}",
+        target.name
+    );
+    assert!(
+        !target.name.contains("redirect"),
+        "policy must target the protected route, not the redirect"
+    );
+
+    let ext = sp.spec.ext_auth.as_ref().expect("extAuth");
+    assert_eq!(ext.fail_open, Some(false), "auth outages must fail closed");
+    let http = ext.http.as_ref().expect("http ext auth");
+    assert_eq!(http.backend_refs[0].name, "badger-shim");
+    assert_eq!(http.backend_refs[0].port, Some(9001));
+    assert_eq!(http.path.as_deref(), Some("/verify"));
+    assert_eq!(
+        ext.headers_to_ext_auth.as_deref(),
+        Some(&["cookie".to_string(), "authorization".to_string()][..])
+    );
+}
+
+#[test]
+fn real_fixtures_protected_routes_gated_by_default() {
+    // The upstream fixtures carry badger on every non-redirect router. With
+    // production defaults (no ext-authz, no override) only redirect routers
+    // survive — nothing protected may leak.
+    let mut cfg = test_config();
+    cfg.allow_unauthenticated_routes = false;
+
+    for fixture in [
+        "pangolin-traefik-v3.5.0-extended.json",
+        "pangolin-traefik-v3.5.0-older.json",
+    ] {
+        let desired = build_desired(&cfg, &load_fixture(fixture));
+        for name in desired.http_routes.keys() {
+            assert!(
+                name.contains("redirect"),
+                "{fixture}: protected route {name} emitted without auth"
+            );
+        }
+    }
 }
 
 #[test]

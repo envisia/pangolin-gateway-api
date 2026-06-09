@@ -57,7 +57,7 @@ applies the additions/updates with [Server-Side Apply], and deletes orphans.
 | `middlewares.addPrefix`                  | HTTPRoute filter `URLRewrite{path.ReplacePrefixMatch}`                     |
 | `middlewares.replacePath`                | HTTPRoute filter `URLRewrite{path.ReplaceFullPath}`                        |
 | `middlewares.replacePathRegex`           | not in core Gateway API – logged + skipped                                 |
-| `middlewares.plugin.badger`              | pangolin's auth plugin – configure via Envoy Gateway `SecurityPolicy` instead |
+| `middlewares.plugin.badger`              | pangolin's auth plugin – `SecurityPolicy` (ext-authz) when `CONFIG_EXT_AUTHZ_SERVICE` is set; otherwise the router is **skipped** (see [Authentication](#authentication-badger-protected-resources)) |
 | `tcp.routers[*]` (entrypoint `tcp-<port>`, rule `HostSNI(`*`)`) | `TCPRoute` + a `TCP` listener on port `<port>` (requires `CONFIG_ENABLE_TCP_ROUTES=true`) |
 | `tcp.routers[*]` with a concrete SNI or `tls` options | needs `TLSRoute` passthrough – logged + skipped              |
 | `udp.routers[*]` (entrypoint `udp-<port>`) | `UDPRoute` + a `UDP` listener on port `<port>` (requires `CONFIG_ENABLE_UDP_ROUTES=true`) |
@@ -108,6 +108,32 @@ Both flags default to **off** because they have cluster-level prerequisites:
 Only `HostSNI(`*`)` TCP rules are translated; a concrete SNI (or `tls`
 options on the router) would need TLSRoute passthrough semantics and is logged
 and skipped instead.
+
+## Authentication (badger-protected resources)
+
+Pangolin enforces resource auth (SSO, password, PIN, access rules) through its
+`badger` Traefik plugin, which it attaches to **every** resource router. Envoy
+can't run Traefik plugins, so the controller treats badger-protected routers
+as follows:
+
+1. **`CONFIG_EXT_AUTHZ_SERVICE` set (recommended):** every protected
+   `HTTPRoute` gets an Envoy Gateway `SecurityPolicy` whose `extAuth.http`
+   points at that service. The service must speak Envoy's HTTP external
+   authorization protocol and verify pangolin sessions — typically a small
+   shim in front of pangolin's badger verification API that answers 2xx for a
+   valid session and a redirect to the auth portal otherwise. Policies are
+   emitted with `failOpen: false`: if the auth service is down, protected
+   resources stay closed. The session cookie and `Authorization` header are
+   forwarded by default (`CONFIG_EXT_AUTHZ_HEADERS_TO_EXT_AUTH`).
+2. **Nothing configured (the default):** protected routers are **skipped**
+   with a warning. This is deliberate — emitting them would silently expose
+   SSO/password/PIN-protected resources to the internet. Redirect-only routers
+   (pangolin's `redirect-to-https`) carry no auth and are unaffected.
+3. **`CONFIG_ALLOW_UNAUTHENTICATED_ROUTES=true`:** escape hatch that emits
+   protected routers *without* any auth filter. Only sane when every pangolin
+   resource is intentionally public.
+
+Raw TCP/UDP resources are not affected — pangolin does not apply badger at L4.
 
 ## Certificate handling with cert-manager
 
@@ -209,6 +235,13 @@ upstream Go controller (`CONFIG_*`) where the concepts overlap.
 | `CONFIG_TLS_SECRET_TEMPLATE`       | _(unset)_                                   | Template for cert secret name. `{hostname}` and `{hostname-dashed}` placeholders. When unset, no HTTPS listener is created. |
 | `CONFIG_TLS_SECRET_NAMESPACE`      | controller namespace                        | Namespace where TLS Secrets live                                            |
 | `CONFIG_BACKEND_KIND`              | `envoy-backend`                             | `envoy-backend` (default) or `service`. See [Backend strategy](#backend-strategy) |
+| `CONFIG_EXT_AUTHZ_SERVICE`         | _(unset)_                                   | Service name of the ext-authz endpoint for badger-protected routes. See [Authentication](#authentication-badger-protected-resources) |
+| `CONFIG_EXT_AUTHZ_NAMESPACE`       | controller namespace                        | Namespace of the ext-authz Service (cross-ns needs a ReferenceGrant)        |
+| `CONFIG_EXT_AUTHZ_PORT`            | `80`                                        | Port of the ext-authz Service                                               |
+| `CONFIG_EXT_AUTHZ_PATH`            | _(unset)_                                   | Optional path prefix for check requests                                     |
+| `CONFIG_EXT_AUTHZ_HEADERS_TO_EXT_AUTH` | `cookie,authorization`                  | Client headers forwarded to the ext-authz service                           |
+| `CONFIG_EXT_AUTHZ_HEADERS_TO_BACKEND` | _(empty)_                                | Auth-response headers copied onto the upstream request                      |
+| `CONFIG_ALLOW_UNAUTHENTICATED_ROUTES` | `false`                                  | **Dangerous.** Emit badger-protected routes without auth                    |
 | `CONFIG_HTTPROUTE_ANNOTATIONS`     | _(unset)_                                   | `k=v,k=v` annotations stamped on every HTTPRoute. Typical: `cert-manager.io/cluster-issuer=letsencrypt-prod` |
 | `CONFIG_LISTENERSET_ANNOTATIONS`   | _(unset)_                                   | `k=v,k=v` annotations stamped on the ListenerSet                            |
 | `CONFIG_FIELD_MANAGER`             | `pangolin-gateway-controller`                 | Server-Side Apply field manager                                             |
