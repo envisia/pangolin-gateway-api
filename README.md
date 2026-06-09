@@ -97,6 +97,9 @@ Pangolin targets with an `https://` URL get TLS origination:
   otherwise system-CA validation with SNI. Cluster-DNS https targets are
   wrapped in a `Backend` (FQDN endpoint) instead of the usual direct Service
   backendRef, because that's the only place skip-verify can be expressed.
+  Requires an Envoy Gateway whose Backend CRD carries `spec.tls` with
+  `insecureSkipVerify`/`sni` — **EG v1.7+** (older CRDs reject the field
+  under Server-Side Apply).
 - **service mode** emits a `BackendTLSPolicy` (system CAs + hostname). Limits:
   skip-verify cannot be expressed, IP targets need a matching IP SAN in the
   certificate, and a policy can only be attached to Services in the
