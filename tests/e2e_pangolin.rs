@@ -56,6 +56,11 @@ fn e2e_config(endpoint: &str, namespace: &str, parent_gateway: &str) -> Config {
         enable_tcp_routes: false,
         enable_udp_routes: false,
         backend_kind: BackendKind::Service,
+        ext_authz: None,
+        // Real pangolin attaches its badger auth plugin to every resource
+        // router. This e2e validates the routing objects, not auth, so opt in
+        // to emitting the protected route without a SecurityPolicy.
+        allow_unauthenticated_routes: true,
         tls_secret_template: None,
         tls_secret_namespace: None,
 

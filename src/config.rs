@@ -35,6 +35,17 @@ pub struct Config {
     /// Which Kubernetes object kind backs an HTTPRoute's IP/FQDN targets.
     pub backend_kind: BackendKind,
 
+    /// External authorization wiring for pangolin's `badger`-protected routers.
+    /// When set, every protected HTTPRoute gets an Envoy Gateway `SecurityPolicy`
+    /// whose `extAuth.http` points at this service. When unset, protected
+    /// routers are **skipped** unless `allow_unauthenticated_routes` is true —
+    /// emitting them without auth would silently expose protected resources.
+    pub ext_authz: Option<ExtAuthzConfig>,
+    /// Escape hatch: emit badger-protected routers *without* any auth filter.
+    /// Dangerous — every pangolin resource behind SSO/password/PIN becomes
+    /// publicly reachable through the gateway. Default false.
+    pub allow_unauthenticated_routes: bool,
+
     /// Optional template for the TLS secret name per hostname. Supports the placeholders
     /// `{hostname}` (dots kept) and `{hostname-dashed}` (dots → dashes).
     /// When `None`, listeners are plain HTTP only.
@@ -78,6 +89,29 @@ pub enum BackendKind {
     /// Service/EndpointSlice stubs. Set `CONFIG_BACKEND_KIND=service` for
     /// portability to other Gateway API implementations.
     EnvoyBackend,
+}
+
+/// Where Envoy should send ext-authz check requests for badger-protected routes.
+/// The target is expected to speak Envoy's HTTP external-authorization protocol
+/// and verify pangolin sessions (e.g. a small shim in front of pangolin's
+/// `/api/v1/badger` verification endpoint).
+#[derive(Debug, Clone)]
+pub struct ExtAuthzConfig {
+    /// Kubernetes Service name of the auth service (`CONFIG_EXT_AUTHZ_SERVICE`).
+    pub service: String,
+    /// Namespace of that Service; defaults to the controller namespace. A
+    /// cross-namespace reference needs a ReferenceGrant in the target namespace.
+    pub namespace: Option<String>,
+    /// Service port (`CONFIG_EXT_AUTHZ_PORT`, default 80).
+    pub port: i32,
+    /// Optional path prefix for check requests (`CONFIG_EXT_AUTHZ_PATH`).
+    pub path: Option<String>,
+    /// Client headers forwarded to the auth service
+    /// (`CONFIG_EXT_AUTHZ_HEADERS_TO_EXT_AUTH`, default `cookie,authorization`).
+    pub headers_to_ext_auth: Vec<String>,
+    /// Auth-service response headers copied onto the upstream request
+    /// (`CONFIG_EXT_AUTHZ_HEADERS_TO_BACKEND`, default empty).
+    pub headers_to_backend: Vec<String>,
 }
 
 impl BackendKind {
@@ -136,6 +170,21 @@ impl Config {
                 Some(raw) => BackendKind::parse(&raw)?,
                 None => BackendKind::EnvoyBackend,
             },
+            ext_authz: match optional_env("CONFIG_EXT_AUTHZ_SERVICE") {
+                Some(service) => Some(ExtAuthzConfig {
+                    service,
+                    namespace: optional_env("CONFIG_EXT_AUTHZ_NAMESPACE"),
+                    port: i32_env("CONFIG_EXT_AUTHZ_PORT", 80)?,
+                    path: optional_env("CONFIG_EXT_AUTHZ_PATH"),
+                    headers_to_ext_auth: csv_env(
+                        "CONFIG_EXT_AUTHZ_HEADERS_TO_EXT_AUTH",
+                        &["cookie", "authorization"],
+                    ),
+                    headers_to_backend: csv_env("CONFIG_EXT_AUTHZ_HEADERS_TO_BACKEND", &[]),
+                }),
+                None => None,
+            },
+            allow_unauthenticated_routes: bool_env("CONFIG_ALLOW_UNAUTHENTICATED_ROUTES", false)?,
             tls_secret_template: optional_env("CONFIG_TLS_SECRET_TEMPLATE"),
             tls_secret_namespace: optional_env("CONFIG_TLS_SECRET_NAMESPACE"),
 
@@ -219,6 +268,19 @@ fn i32_env(key: &str, default: i32) -> Result<i32> {
         Some(v) => v
             .parse()
             .with_context(|| format!("invalid i32 for {key}: {v:?}")),
+    }
+}
+
+/// Parse a comma-separated list, falling back to `default` when unset.
+fn csv_env(key: &str, default: &[&str]) -> Vec<String> {
+    match optional_env(key) {
+        None => default.iter().map(|s| s.to_string()).collect(),
+        Some(raw) => raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
     }
 }
 

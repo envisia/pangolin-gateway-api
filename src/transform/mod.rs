@@ -1,6 +1,7 @@
 //! Transform pangolin's Traefik dynamic config into a desired set of Gateway API objects.
 
 pub mod backend;
+pub mod ext_authz;
 pub mod l4;
 pub mod listener;
 pub mod middleware;
@@ -15,7 +16,7 @@ use k8s_openapi::api::discovery::v1::EndpointSlice;
 use tracing::warn;
 
 use crate::config::Config;
-use crate::envoy_gateway::Backend;
+use crate::envoy_gateway::{Backend, SecurityPolicy};
 use crate::pangolin::TraefikDynamicConfig;
 use crate::pangolin::types::L4Config;
 use crate::transform::l4::L4Protocol;
@@ -38,6 +39,9 @@ pub struct Desired {
     pub tcp_routes: BTreeMap<String, TCPRoute>,
     /// Populated only when `CONFIG_ENABLE_UDP_ROUTES=true`. Empty otherwise.
     pub udp_routes: BTreeMap<String, UDPRoute>,
+    /// One per badger-protected HTTPRoute. Populated only when
+    /// `CONFIG_EXT_AUTHZ_SERVICE` is configured. Empty otherwise.
+    pub security_policies: BTreeMap<String, SecurityPolicy>,
 }
 
 pub fn build_desired(cfg: &Config, dyn_config: &TraefikDynamicConfig) -> Desired {

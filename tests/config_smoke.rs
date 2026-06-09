@@ -27,6 +27,13 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "CONFIG_ENABLE_TCP_ROUTES",
     "CONFIG_ENABLE_UDP_ROUTES",
     "CONFIG_BACKEND_KIND",
+    "CONFIG_EXT_AUTHZ_SERVICE",
+    "CONFIG_EXT_AUTHZ_NAMESPACE",
+    "CONFIG_EXT_AUTHZ_PORT",
+    "CONFIG_EXT_AUTHZ_PATH",
+    "CONFIG_EXT_AUTHZ_HEADERS_TO_EXT_AUTH",
+    "CONFIG_EXT_AUTHZ_HEADERS_TO_BACKEND",
+    "CONFIG_ALLOW_UNAUTHENTICATED_ROUTES",
     "CONFIG_TLS_SECRET_TEMPLATE",
     "CONFIG_TLS_SECRET_NAMESPACE",
     "CONFIG_FIELD_MANAGER",
@@ -141,6 +148,8 @@ fn from_env_smoke() {
     assert!(cfg.enable_https_listeners);
     assert!(!cfg.enable_tcp_routes);
     assert!(!cfg.enable_udp_routes);
+    assert!(cfg.ext_authz.is_none());
+    assert!(!cfg.allow_unauthenticated_routes);
     assert!(!cfg.tls_skip_verify);
     assert!(!cfg.read_only);
     assert!(cfg.httproute_annotations.is_empty());
@@ -167,6 +176,11 @@ fn from_env_smoke() {
     set("CONFIG_ENABLE_TCP_ROUTES", "true");
     set("CONFIG_ENABLE_UDP_ROUTES", "true");
     set("CONFIG_BACKEND_KIND", "service");
+    set("CONFIG_EXT_AUTHZ_SERVICE", "badger-shim");
+    set("CONFIG_EXT_AUTHZ_NAMESPACE", "auth-system");
+    set("CONFIG_EXT_AUTHZ_PORT", "9001");
+    set("CONFIG_EXT_AUTHZ_PATH", "/verify");
+    set("CONFIG_EXT_AUTHZ_HEADERS_TO_BACKEND", "x-user-id, x-org-id");
     set("CONFIG_TLS_SECRET_TEMPLATE", "{hostname-dashed}-tls");
     set("CONFIG_TLS_SECRET_NAMESPACE", "certs");
     set(
@@ -197,6 +211,14 @@ fn from_env_smoke() {
     assert!(cfg.enable_tcp_routes);
     assert!(cfg.enable_udp_routes);
     assert_eq!(cfg.backend_kind, BackendKind::Service);
+    let ea = cfg.ext_authz.as_ref().expect("ext_authz configured");
+    assert_eq!(ea.service, "badger-shim");
+    assert_eq!(ea.namespace.as_deref(), Some("auth-system"));
+    assert_eq!(ea.port, 9001);
+    assert_eq!(ea.path.as_deref(), Some("/verify"));
+    // Unset → defaults; explicitly set → parsed csv.
+    assert_eq!(ea.headers_to_ext_auth, vec!["cookie", "authorization"]);
+    assert_eq!(ea.headers_to_backend, vec!["x-user-id", "x-org-id"]);
     assert_eq!(
         cfg.tls_secret_template.as_deref(),
         Some("{hostname-dashed}-tls")

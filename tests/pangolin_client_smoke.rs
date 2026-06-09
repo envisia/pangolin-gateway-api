@@ -116,6 +116,8 @@ fn config_pointing_at(endpoint: &str) -> Config {
         enable_tcp_routes: false,
         enable_udp_routes: false,
         backend_kind: BackendKind::Service,
+        ext_authz: None,
+        allow_unauthenticated_routes: false,
         tls_secret_template: None,
         tls_secret_namespace: None,
         field_manager: "pangolin-gateway-controller".into(),
