@@ -71,6 +71,10 @@ pub struct Config {
 
     pub read_only: bool,
     pub log_traefik_config: bool,
+
+    /// Listen address for `/healthz` + `/readyz` (`CONFIG_HEALTH_LISTEN`,
+    /// default `0.0.0.0:8081`). Set to `off` to disable.
+    pub health_listen: Option<String>,
 }
 
 /// Backend object kind used for IP / FQDN pangolin targets.
@@ -208,6 +212,12 @@ impl Config {
 
             read_only: bool_env("CONFIG_READ_ONLY", false)?,
             log_traefik_config: bool_env("CONFIG_LOG_TRAEFIK_CONFIG", false)?,
+
+            health_listen: match optional_env("CONFIG_HEALTH_LISTEN") {
+                None => Some("0.0.0.0:8081".into()),
+                Some(v) if matches!(v.as_str(), "off" | "disabled" | "none") => None,
+                Some(v) => Some(v),
+            },
         })
     }
 

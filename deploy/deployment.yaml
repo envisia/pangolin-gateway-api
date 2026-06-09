@@ -26,7 +26,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: controller
-          image: ghcr.io/envisia/pangolin-gateway-controller:0.1.0
+          image: ghcr.io/envisia/pangolin-gateway-controller:0.2.0
           imagePullPolicy: IfNotPresent
           env:
             # --- required ---
@@ -89,6 +89,20 @@ spec:
             #   value: "cert-manager.io/cluster-issuer=letsencrypt-prod"
             - name: RUST_LOG
               value: "info,pangolin_gateway_controller=info"
+          ports:
+            - name: health
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            # Ready once the first pangolin poll cycle succeeds.
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
           resources:
             requests:
               cpu: 50m

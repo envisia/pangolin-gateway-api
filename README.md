@@ -52,8 +52,9 @@ applies the additions/updates with [Server-Side Apply], and deletes orphans.
 | `http.services[*].loadBalancer` (cluster DNS `<svc>.<ns>.svc[.cluster.local]`) | direct backendRef to the existing Service (both modes)            |
 | `http.services[*].loadBalancer` (other FQDN, e.g. `api.example.com`) | _service mode:_ logged and dropped (EndpointSlice can't carry hostnames).<br>_envoy-backend mode:_ `Backend.spec.endpoints[].fqdn`. |
 | `middlewares.redirectScheme`             | HTTPRoute filter `RequestRedirect{scheme}`                                 |
-| `middlewares.headers.customRequestHeaders` | HTTPRoute filter `RequestHeaderModifier{set}`                            |
+| `middlewares.headers.customRequestHeaders` | HTTPRoute filter `RequestHeaderModifier{set}` — except `Host`, which becomes `URLRewrite{hostname}` (Gateway API forbids Host via header modifiers) |
 | `middlewares.headers.customResponseHeaders` | HTTPRoute filter `ResponseHeaderModifier{set}`                          |
+| `http.services[*].loadBalancer` (https URL) | TLS origination: _envoy-backend mode:_ `Backend.spec.tls` (incl. `insecureSkipVerify` from the service's `serversTransport`).<br>_service mode:_ `BackendTLSPolicy` (system CAs; same-namespace targets only). |
 | `middlewares.addPrefix`                  | HTTPRoute filter `URLRewrite{path.ReplacePrefixMatch}`                     |
 | `middlewares.replacePath`                | HTTPRoute filter `URLRewrite{path.ReplaceFullPath}`                        |
 | `middlewares.replacePathRegex`           | not in core Gateway API – logged + skipped                                 |
@@ -85,6 +86,22 @@ Pick the default (`envoy-backend`) unless you need portability to a non-Envoy
 Gateway API implementation — `Backend` supports FQDN targets and unlocks the
 CRD's other features (health checking via `BackendTrafficPolicy`, etc.), at
 the cost of being Envoy Gateway-specific.
+
+### TLS to backends (https targets)
+
+Pangolin targets with an `https://` URL get TLS origination:
+
+- **envoy-backend mode** expresses everything on the `Backend` itself
+  (`spec.tls`): `insecureSkipVerify` when the pangolin service's
+  `serversTransport` requests it (pangolin's "skip TLS verification" option),
+  otherwise system-CA validation with SNI. Cluster-DNS https targets are
+  wrapped in a `Backend` (FQDN endpoint) instead of the usual direct Service
+  backendRef, because that's the only place skip-verify can be expressed.
+- **service mode** emits a `BackendTLSPolicy` (system CAs + hostname). Limits:
+  skip-verify cannot be expressed, IP targets need a matching IP SAN in the
+  certificate, and a policy can only be attached to Services in the
+  controller's own namespace — cross-namespace https targets are warned about
+  and need a manual `BackendTLSPolicy` in the target namespace.
 
 ## Raw TCP/UDP resources
 
@@ -156,8 +173,11 @@ Configuration (env, all prefixed `SHIM_`): `SHIM_PANGOLIN_API_BASE_URL`
 `SHIM_LISTEN` (`0.0.0.0:9001`), `SHIM_PATH_PREFIX` (`/verify`, must equal
 `CONFIG_EXT_AUTHZ_PATH`), `SHIM_USER_SESSION_COOKIE_NAME` (`p_session_token`),
 `SHIM_RESOURCE_SESSION_REQUEST_PARAM` (`p_session_request`),
-`SHIM_PANGOLIN_TIMEOUT` (`10s`). A ready-to-adapt Deployment + Service lives
-in [`deploy/badger-shim.yaml`](deploy/badger-shim.yaml).
+`SHIM_PANGOLIN_TIMEOUT` (`10s`), `SHIM_CA_FILE` (PEM bundle for an https
+pangolin API), `SHIM_TLS_SKIP_VERIFY` (requires
+`I_UNDERSTAND_SHIM_TLS_SKIP_VERIFY_IS_INSECURE=true`). A ready-to-adapt
+Deployment + Service lives in
+[`deploy/badger-shim.yaml`](deploy/badger-shim.yaml).
 
 To pass the verified identity on to backends, list the shim's response
 headers in `CONFIG_EXT_AUTHZ_HEADERS_TO_BACKEND`
@@ -277,6 +297,7 @@ upstream Go controller (`CONFIG_*`) where the concepts overlap.
 | `CONFIG_MANAGED_LABEL_VALUE`       | `pangolin-gateway-controller`                 | Used for GC selector                                                        |
 | `CONFIG_INSTANCE_LABEL_KEY`        | `pangolin.envisia.de/instance`              | Lets multiple controller instances coexist without trampling each other     |
 | `CONFIG_INSTANCE_LABEL_VALUE`      | `default`                                   |                                                                             |
+| `CONFIG_HEALTH_LISTEN`             | `0.0.0.0:8081`                              | `/healthz` (liveness) + `/readyz` (ready after the first successful poll). Set `off` to disable. |
 | `CONFIG_READ_ONLY`                 | `false`                                     | Dry-run: log what would happen, do not call apply/delete                    |
 | `CONFIG_LOG_TRAEFIK_CONFIG`        | `false`                                     | Debug: log the raw pangolin response at `debug` level                       |
 

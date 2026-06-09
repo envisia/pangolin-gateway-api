@@ -9,6 +9,7 @@ pub mod apply;
 pub mod config;
 pub mod envoy_gateway;
 pub mod gc;
+pub mod health;
 pub mod pangolin;
 pub mod reconcile;
 pub mod shim;

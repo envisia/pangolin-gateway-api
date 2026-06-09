@@ -63,6 +63,12 @@ pub struct ShimConfig {
     pub resource_session_request_param: String,
     /// `SHIM_PANGOLIN_TIMEOUT`, default 10s.
     pub timeout: Duration,
+    /// `SHIM_CA_FILE` — PEM bundle to trust for an https pangolin API.
+    pub ca_file: Option<String>,
+    /// `SHIM_TLS_SKIP_VERIFY` — requires
+    /// `I_UNDERSTAND_SHIM_TLS_SKIP_VERIFY_IS_INSECURE=true`, mirroring the
+    /// controller's guard.
+    pub tls_skip_verify: bool,
 }
 
 impl ShimConfig {
@@ -75,6 +81,19 @@ impl ShimConfig {
         let path_prefix = optional("SHIM_PATH_PREFIX").unwrap_or_else(|| "/verify".into());
         if !path_prefix.is_empty() && !path_prefix.starts_with('/') {
             bail!("SHIM_PATH_PREFIX must start with '/' (got {path_prefix:?})");
+        }
+
+        let tls_skip_verify = optional("SHIM_TLS_SKIP_VERIFY").is_some_and(|v| {
+            matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+        });
+        if tls_skip_verify
+            && !optional("I_UNDERSTAND_SHIM_TLS_SKIP_VERIFY_IS_INSECURE")
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+        {
+            bail!(
+                "SHIM_TLS_SKIP_VERIFY=true requires \
+                 I_UNDERSTAND_SHIM_TLS_SKIP_VERIFY_IS_INSECURE=true to be explicitly set"
+            );
         }
 
         Ok(Self {
@@ -90,8 +109,27 @@ impl ShimConfig {
                 .transpose()
                 .context("invalid SHIM_PANGOLIN_TIMEOUT")?
                 .unwrap_or(Duration::from_secs(10)),
+            ca_file: optional("SHIM_CA_FILE"),
+            tls_skip_verify,
         })
     }
+}
+
+/// HTTP client honoring the shim's TLS settings towards pangolin.
+pub fn build_http_client(cfg: &ShimConfig) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder();
+    if let Some(path) = &cfg.ca_file {
+        let pem = std::fs::read(path).with_context(|| format!("reading SHIM_CA_FILE {path}"))?;
+        let cert = reqwest::Certificate::from_pem_bundle(&pem)
+            .with_context(|| format!("parsing SHIM_CA_FILE {path}"))?;
+        for c in cert {
+            builder = builder.add_root_certificate(c);
+        }
+    }
+    if cfg.tls_skip_verify {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    builder.build().context("building HTTP client")
 }
 
 fn optional(key: &str) -> Option<String> {

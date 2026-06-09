@@ -83,6 +83,7 @@ that file for authoritative defaults.
 | `CONFIG_HTTPROUTE_ANNOTATIONS` | _(empty)_ | `k=v,k=v` annotations stamped onto every `HTTPRoute`. Typical use: cert-manager cluster-issuer. |
 | `CONFIG_LISTENERSET_ANNOTATIONS` | _(empty)_ | Same for `ListenerSet`. |
 | `CONFIG_FIELD_MANAGER` | `pangolin-gateway-controller` | SSA field manager. Change only if you need to migrate ownership. |
+| `CONFIG_HEALTH_LISTEN` | `0.0.0.0:8081` | Liveness (`/healthz`) + readiness (`/readyz`, ready after the first successful poll cycle). The shipped Deployment wires both probes. Set `off` to disable. |
 | `RUST_LOG` | `info` | Standard `tracing_subscriber::EnvFilter`. |
 
 `Service` and `EndpointSlice` deliberately **do not** receive

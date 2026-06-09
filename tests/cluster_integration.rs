@@ -37,6 +37,7 @@ use url::Url;
 
 use pangolin_gateway_controller::config::{BackendKind, Config};
 use pangolin_gateway_controller::envoy_gateway::Backend as EnvoyBackend;
+use pangolin_gateway_controller::health::Readiness;
 use pangolin_gateway_controller::{pangolin, reconcile};
 
 /// Per-test instance label. Keeps the two test runs from GC-deleting each
@@ -90,6 +91,7 @@ fn integration_config(
 
         read_only: false,
         log_traefik_config: false,
+        health_listen: None,
     }
 }
 
@@ -177,9 +179,16 @@ async fn controller_reconciles_service_backends() {
         let cfg = cfg.clone();
         let kube_client = kube_client.clone();
         let shutdown = shutdown.clone();
-        tokio::spawn(
-            async move { reconcile::run_loop(cfg, kube_client, pang_client, shutdown).await },
-        )
+        tokio::spawn(async move {
+            reconcile::run_loop(
+                cfg,
+                kube_client,
+                pang_client,
+                shutdown,
+                Readiness::default(),
+            )
+            .await
+        })
     };
 
     let route_api: Api<HTTPRoute> = Api::namespaced(kube_client.clone(), &namespace);
@@ -251,9 +260,16 @@ async fn controller_reconciles_l4_routes() {
         let cfg = cfg.clone();
         let kube_client = kube_client.clone();
         let shutdown = shutdown.clone();
-        tokio::spawn(
-            async move { reconcile::run_loop(cfg, kube_client, pang_client, shutdown).await },
-        )
+        tokio::spawn(async move {
+            reconcile::run_loop(
+                cfg,
+                kube_client,
+                pang_client,
+                shutdown,
+                Readiness::default(),
+            )
+            .await
+        })
     };
 
     let route_api: Api<HTTPRoute> = Api::namespaced(kube_client.clone(), &namespace);
@@ -349,9 +365,16 @@ async fn controller_reconciles_envoy_backends() {
         let cfg = cfg.clone();
         let kube_client = kube_client.clone();
         let shutdown = shutdown.clone();
-        tokio::spawn(
-            async move { reconcile::run_loop(cfg, kube_client, pang_client, shutdown).await },
-        )
+        tokio::spawn(async move {
+            reconcile::run_loop(
+                cfg,
+                kube_client,
+                pang_client,
+                shutdown,
+                Readiness::default(),
+            )
+            .await
+        })
     };
 
     let route_api: Api<HTTPRoute> = Api::namespaced(kube_client.clone(), &namespace);

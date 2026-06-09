@@ -34,7 +34,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: shim
-          image: ghcr.io/envisia/pangolin-gateway-controller:0.1.0
+          image: ghcr.io/envisia/pangolin-gateway-controller:0.2.0
           imagePullPolicy: IfNotPresent
           command: ["/usr/local/bin/badger-ext-authz-shim"]
           env:

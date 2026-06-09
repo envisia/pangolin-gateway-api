@@ -8,9 +8,12 @@ use gateway_api::apis::experimental::httproutes::HTTPRoute;
 use gateway_api::apis::experimental::listenersets::ListenerSet;
 use gateway_api::apis::experimental::tcproutes::TCPRoute;
 use gateway_api::apis::experimental::udproutes::UDPRoute;
+use gateway_api::apis::standard::backendtlspolicies::BackendTLSPolicy;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::Api;
+use kube::api::ListParams;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -18,6 +21,7 @@ use crate::apply::ssa_apply;
 use crate::config::{BackendKind, Config};
 use crate::envoy_gateway::{Backend as EnvoyBackend, SecurityPolicy};
 use crate::gc;
+use crate::health::Readiness;
 use crate::pangolin::{Client as PangClient, FetchOutcome};
 use crate::transform::{Desired, build_desired};
 
@@ -26,6 +30,7 @@ pub async fn run_loop(
     kube_client: kube::Client,
     pang: PangClient,
     shutdown: CancellationToken,
+    ready: Readiness,
 ) -> Result<()> {
     let mut last_etag: Option<String> = None;
     let mut last_digest: Option<String> = None;
@@ -55,6 +60,7 @@ pub async fn run_loop(
         match outcome {
             FetchOutcome::NotModified => {
                 info!("pangolin: 304 not modified");
+                ready.set_ready();
             }
             FetchOutcome::Changed(changed) => {
                 let crate::pangolin::client::ChangedConfig {
@@ -89,6 +95,7 @@ pub async fn run_loop(
                     }
                     last_digest = Some(digest);
                 }
+                ready.set_ready();
                 last_etag = etag.or(last_etag);
             }
         }
@@ -109,6 +116,7 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     let tcp_api: Api<TCPRoute> = Api::namespaced(kube_client.clone(), ns);
     let udp_api: Api<UDPRoute> = Api::namespaced(kube_client.clone(), ns);
     let sp_api: Api<SecurityPolicy> = Api::namespaced(kube_client.clone(), ns);
+    let btp_api: Api<BackendTLSPolicy> = Api::namespaced(kube_client.clone(), ns);
 
     // Apply backends first so HTTPRoute backendRefs resolve immediately.
     for svc in desired.services.values() {
@@ -119,6 +127,9 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     }
     for be in desired.envoy_backends.values() {
         ssa_apply(&be_api, cfg, be).await?;
+    }
+    for btp in desired.backend_tls_policies.values() {
+        ssa_apply(&btp_api, cfg, btp).await?;
     }
     // Then listener set so the parent for routes exists.
     for ls in desired.listener_sets.values() {
@@ -147,6 +158,7 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     let tcp_names: BTreeSet<String> = desired.tcp_routes.keys().cloned().collect();
     let udp_names: BTreeSet<String> = desired.udp_routes.keys().cloned().collect();
     let sp_names: BTreeSet<String> = desired.security_policies.keys().cloned().collect();
+    let btp_names: BTreeSet<String> = desired.backend_tls_policies.keys().cloned().collect();
 
     if let Err(e) = gc::sweep(&route_api, cfg, &route_names).await {
         warn!(error = ?e, "GC HTTPRoute failed");
@@ -187,7 +199,97 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     {
         warn!(error = ?e, "GC SecurityPolicy failed");
     }
+    // BackendTLSPolicy is a standard-channel Gateway API CRD; the documented
+    // install (experimental channel >= v1.5) always carries it.
+    if let Err(e) = gc::sweep(&btp_api, cfg, &btp_names).await {
+        warn!(error = ?e, "GC BackendTLSPolicy failed");
+    }
+
+    // Surface rejected objects: a route the gateway refuses (missing
+    // ReferenceGrant, unsupported listener, EG version mismatch) is otherwise
+    // only visible via `kubectl describe`. Statuses are eventually consistent,
+    // so a fresh apply may legitimately not be reflected yet — persistent
+    // warnings across cycles are the real signal.
+    report_status(&route_api, cfg, "HTTPRoute", |r: &HTTPRoute| {
+        r.status
+            .as_ref()
+            .map(|s| {
+                s.parents
+                    .iter()
+                    .flat_map(|p| p.conditions.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .await;
+    report_status(&ls_api, cfg, "ListenerSet", |ls: &ListenerSet| {
+        ls.status
+            .as_ref()
+            .and_then(|s| s.conditions.clone())
+            .unwrap_or_default()
+    })
+    .await;
+    if cfg.enable_tcp_routes {
+        report_status(&tcp_api, cfg, "TCPRoute", |r: &TCPRoute| {
+            r.status
+                .as_ref()
+                .map(|s| {
+                    s.parents
+                        .iter()
+                        .flat_map(|p| p.conditions.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .await;
+    }
+    if cfg.enable_udp_routes {
+        report_status(&udp_api, cfg, "UDPRoute", |r: &UDPRoute| {
+            r.status
+                .as_ref()
+                .map(|s| {
+                    s.parents
+                        .iter()
+                        .flat_map(|p| p.conditions.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .await;
+    }
     Ok(())
+}
+
+/// Log a warning for every managed object of one kind that carries a
+/// `status=False` condition (Accepted, ResolvedRefs, Programmed, …).
+async fn report_status<T, F>(api: &Api<T>, cfg: &Config, kind: &str, conditions: F)
+where
+    T: kube::Resource<DynamicType = ()> + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+    F: Fn(&T) -> Vec<Condition>,
+{
+    let lp = ListParams::default().labels(&cfg.managed_selector());
+    let list = match api.list(&lp).await {
+        Ok(l) => l,
+        Err(e) => {
+            warn!(error = ?e, kind, "listing for status report failed");
+            return;
+        }
+    };
+    for obj in &list.items {
+        let name = obj.meta().name.as_deref().unwrap_or("<unnamed>");
+        for c in conditions(obj) {
+            if c.status == "False" {
+                warn!(
+                    kind,
+                    name,
+                    condition = %c.type_,
+                    reason = %c.reason,
+                    message = %c.message,
+                    "object not accepted by the gateway"
+                );
+            }
+        }
+    }
 }
 
 /// Sleep for `dur`, returning true if shutdown was requested before the timer expired.

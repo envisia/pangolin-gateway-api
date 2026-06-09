@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tracing::info;
 
-use pangolin_gateway_controller::shim::{ShimConfig, ShimState, router};
+use pangolin_gateway_controller::shim::{ShimConfig, ShimState, build_http_client, router};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,9 +26,7 @@ async fn main() -> Result<()> {
     );
 
     let state = Arc::new(ShimState {
-        http: reqwest::Client::builder()
-            .build()
-            .context("building HTTP client")?,
+        http: build_http_client(&cfg)?,
         cfg: cfg.clone(),
     });
 

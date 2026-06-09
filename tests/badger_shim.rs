@@ -58,6 +58,8 @@ async fn spawn_shim(pangolin_base: &str) -> String {
         user_session_cookie_name: "p_session_token".into(),
         resource_session_request_param: "p_session_request".into(),
         timeout: Duration::from_secs(5),
+        ca_file: None,
+        tls_skip_verify: false,
     };
     let state = Arc::new(ShimState {
         cfg,

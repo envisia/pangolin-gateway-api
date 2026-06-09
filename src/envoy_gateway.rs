@@ -25,6 +25,26 @@ pub struct BackendSpec {
     /// Endpoints carries one entry per target. Each entry sets exactly one of
     /// `ip` / `fqdn` / `unix`. We never emit `unix`.
     pub endpoints: Vec<BackendEndpoint>,
+    /// TLS origination towards the backend. Setting this alone makes Envoy
+    /// speak TLS to the endpoints (see EG's backend-skip-tls-verification
+    /// task); a BackendTLSPolicy targeting this Backend merges on top.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<BackendTlsSettings>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendTlsSettings {
+    /// `"System"` — validate against the proxy container's system CA pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub well_known_ca_certificates: Option<String>,
+    /// Disable certificate validation entirely. Mirrors pangolin's
+    /// `serversTransports[].insecureSkipVerify`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insecure_skip_verify: Option<bool>,
+    /// SNI + SAN match for verification. Must be a DNS hostname.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default, PartialEq)]

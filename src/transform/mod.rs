@@ -24,6 +24,7 @@ use gateway_api::apis::experimental::httproutes::HTTPRoute;
 use gateway_api::apis::experimental::listenersets::{ListenerSet, ListenerSetListeners};
 use gateway_api::apis::experimental::tcproutes::TCPRoute;
 use gateway_api::apis::experimental::udproutes::UDPRoute;
+use gateway_api::apis::standard::backendtlspolicies::BackendTLSPolicy;
 
 /// Everything the controller wants to exist in the cluster, keyed by resource name.
 /// Names are guaranteed DNS-label safe.
@@ -42,13 +43,22 @@ pub struct Desired {
     /// One per badger-protected HTTPRoute. Populated only when
     /// `CONFIG_EXT_AUTHZ_SERVICE` is configured. Empty otherwise.
     pub security_policies: BTreeMap<String, SecurityPolicy>,
+    /// TLS-origination policies for https targets resolved to Service
+    /// backendRefs (service mode / same-namespace cluster-DNS only —
+    /// envoy-backend mode expresses TLS on the `Backend` itself).
+    pub backend_tls_policies: BTreeMap<String, BackendTLSPolicy>,
 }
 
 pub fn build_desired(cfg: &Config, dyn_config: &TraefikDynamicConfig) -> Desired {
     let mut desired = Desired::default();
 
     // 1. Backends: pangolin services -> Service + EndpointSlice (or Envoy Backend CRDs)
-    let backend_index = backend::build_backends(cfg, &dyn_config.http.services, &mut desired);
+    let backend_index = backend::build_backends(
+        cfg,
+        &dyn_config.http.services,
+        &dyn_config.http.servers_transports,
+        &mut desired,
+    );
 
     // 2. Routes: pangolin routers -> HTTPRoute
     let route_index = route::build_routes(cfg, dyn_config, &backend_index, &mut desired);

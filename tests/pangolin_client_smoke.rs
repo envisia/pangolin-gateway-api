@@ -131,6 +131,7 @@ fn config_pointing_at(endpoint: &str) -> Config {
         listenerset_annotations: BTreeMap::new(),
         read_only: false,
         log_traefik_config: false,
+        health_listen: None,
     }
 }
 

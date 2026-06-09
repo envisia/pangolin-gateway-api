@@ -13,7 +13,8 @@ rules:
   # CONFIG_ENABLE_TCP_ROUTES / CONFIG_ENABLE_UDP_ROUTES are set, but granting
   # them unconditionally is safe — RBAC checks happen lazily.
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["httproutes", "listenersets", "tcproutes", "udproutes"]
+    resources:
+      ["httproutes", "listenersets", "tcproutes", "udproutes", "backendtlspolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["gateway.networking.k8s.io"]
     resources:
@@ -22,6 +23,7 @@ rules:
         "listenersets/status",
         "tcproutes/status",
         "udproutes/status",
+        "backendtlspolicies/status",
       ]
     verbs: ["get"]
   # Core resources we synthesize for IP-backed pangolin targets.

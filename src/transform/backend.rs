@@ -24,9 +24,16 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use tracing::warn;
 use url::Url;
 
+use gateway_api::apis::standard::backendtlspolicies::{
+    BackendTLSPolicy, BackendTlsPolicySpec, BackendTlsPolicyTargetRefs, BackendTlsPolicyValidation,
+};
+use serde_json::Value;
+
 use crate::apply::{managed_metadata, owner_labels};
 use crate::config::{BackendKind, Config};
-use crate::envoy_gateway::{Backend, BackendEndpoint, BackendFqdn, BackendIp, BackendSpec};
+use crate::envoy_gateway::{
+    Backend, BackendEndpoint, BackendFqdn, BackendIp, BackendSpec, BackendTlsSettings,
+};
 use crate::pangolin::types::{L4Service, LoadBalancerServer, Service as PangService};
 use crate::transform::Desired;
 use crate::transform::l4::L4Protocol;
@@ -51,6 +58,7 @@ const PORT_NAME: &str = "default";
 pub fn build_backends(
     cfg: &Config,
     services: &BTreeMap<String, PangService>,
+    transports: &BTreeMap<String, Value>,
     desired: &mut Desired,
 ) -> BackendIndex {
     let mut index = BackendIndex::new();
@@ -66,15 +74,57 @@ pub fn build_backends(
             warn!(service = %pang_name, "pangolin service has no servers; skipping");
             continue;
         }
+        if lb.sticky.is_some() {
+            warn!(
+                service = %pang_name,
+                "sticky sessions are not translated; configure session affinity via an \
+                 Envoy Gateway BackendTrafficPolicy if required"
+            );
+        }
+        if lb.pass_host_header == Some(false) {
+            warn!(
+                service = %pang_name,
+                "passHostHeader=false is not translated; the client Host header is \
+                 forwarded as-is (use pangolin's custom-Host-header option instead)"
+            );
+        }
 
+        let skip_verify =
+            transport_skips_verify(pang_name, lb.servers_transport.as_deref(), transports);
         let entries = parse_url_servers(pang_name, &lb.servers);
         let classification = classify_entries(pang_name, &entries, cfg.backend_kind);
-        if let Some(resolved) = emit_backend(cfg, pang_name, classification, "", "TCP", desired) {
+        if let Some(resolved) = emit_backend(
+            cfg,
+            pang_name,
+            classification,
+            "",
+            "TCP",
+            skip_verify,
+            desired,
+        ) {
             index.insert(pang_name.clone(), resolved);
         }
     }
 
     index
+}
+
+/// Does the service's `serversTransport` ask for TLS verification to be
+/// skipped? Pangolin emits `serversTransports[name].insecureSkipVerify: true`
+/// for resources whose target has "skip TLS verification" enabled.
+fn transport_skips_verify(
+    pang_name: &str,
+    transport: Option<&str>,
+    transports: &BTreeMap<String, Value>,
+) -> bool {
+    let Some(name) = transport else {
+        return false;
+    };
+    let Some(t) = transports.get(name) else {
+        warn!(service = %pang_name, transport = %name, "service references unknown serversTransport");
+        return false;
+    };
+    t.get("insecureSkipVerify").and_then(Value::as_bool) == Some(true)
 }
 
 /// L4 sibling of [`build_backends`]: pangolin's `tcp`/`udp` services carry
@@ -108,12 +158,14 @@ pub fn build_l4_backends(
             .filter_map(|s| parse_l4_address(pang_name, &s.address))
             .collect();
         let classification = classify_entries(pang_name, &entries, cfg.backend_kind);
+        // Raw TCP/UDP is opaque passthrough; TLS origination doesn't apply.
         if let Some(resolved) = emit_backend(
             cfg,
             pang_name,
             classification,
             proto.infix(),
             proto.k8s_protocol(),
+            false,
             desired,
         ) {
             index.insert(pang_name.clone(), resolved);
@@ -125,59 +177,88 @@ pub fn build_l4_backends(
 
 /// Dispatch a classification to the right emitter. `infix` distinguishes
 /// synthesized object names per traffic family (`""` for http, `"tcp"`/`"udp"`),
-/// `protocol` is the Kubernetes port protocol for Service/EndpointSlice stubs.
+/// `protocol` is the Kubernetes port protocol for Service/EndpointSlice stubs,
+/// `skip_verify` carries the pangolin serversTransport's `insecureSkipVerify`.
 fn emit_backend(
     cfg: &Config,
     pang_name: &str,
     classification: Classification,
     infix: &str,
     protocol: &str,
+    skip_verify: bool,
     desired: &mut Desired,
 ) -> Option<ResolvedBackend> {
     match classification {
         Classification::Empty => None,
-        Classification::Ips { entries, port } => Some(emit_ip_backend(
-            cfg, pang_name, &entries, port, infix, protocol, desired,
+        Classification::Ips { entries, port, tls } => Some(emit_ip_backend(
+            cfg,
+            pang_name,
+            &entries,
+            port,
+            infix,
+            protocol,
+            tls.then_some(skip_verify),
+            desired,
         )),
         // classify_entries() only returns Fqdn in EnvoyBackend mode.
-        Classification::Fqdn { hostname, port } => Some(emit_fqdn_backend(
-            cfg, pang_name, &hostname, port, infix, desired,
+        Classification::Fqdn {
+            hostname,
+            port,
+            tls,
+        } => Some(emit_fqdn_backend(
+            cfg,
+            pang_name,
+            &hostname,
+            port,
+            infix,
+            tls.then_some(skip_verify),
+            desired,
         )),
         Classification::ClusterDns {
             service,
             namespace,
             port,
-        } => Some(ResolvedBackend {
-            group: String::new(),
-            kind: "Service".into(),
-            name: service,
-            namespace: Some(namespace),
+            tls,
+        } => Some(emit_cluster_dns_backend(
+            cfg,
+            pang_name,
+            &service,
+            &namespace,
             port,
-        }),
+            infix,
+            tls.then_some(skip_verify),
+            desired,
+        )),
     }
 }
 
+/// `tls: Option<bool>` throughout the emitters reads as: `None` = plaintext,
+/// `Some(skip_verify)` = originate TLS, optionally without verification.
 enum Classification {
     Empty,
     Ips {
         entries: Vec<IpAddr>,
         port: i32,
+        tls: bool,
     },
     Fqdn {
         hostname: String,
         port: i32,
+        tls: bool,
     },
     ClusterDns {
         service: String,
         namespace: String,
         port: i32,
+        tls: bool,
     },
 }
 
-/// A server target reduced to its host + port, whatever syntax it arrived in.
+/// A server target reduced to host + port + whether the URL asked for TLS.
 struct HostPort {
     host: String,
     port: i32,
+    tls: bool,
 }
 
 fn parse_url_servers(pang_name: &str, servers: &[LoadBalancerServer]) -> Vec<HostPort> {
@@ -204,7 +285,11 @@ fn parse_url_servers(pang_name: &str, servers: &[LoadBalancerServer]) -> Vec<Hos
                 continue;
             }
         };
-        entries.push(HostPort { host, port });
+        entries.push(HostPort {
+            host,
+            port,
+            tls: url.scheme() == "https",
+        });
     }
     entries
 }
@@ -246,17 +331,19 @@ fn parse_l4_address(pang_name: &str, address: &str) -> Option<HostPort> {
     Some(HostPort {
         host: host.to_string(),
         port: i32::from(port),
+        tls: false,
     })
 }
 
 fn classify_entries(pang_name: &str, entries: &[HostPort], kind: BackendKind) -> Classification {
     let mut ips: Vec<IpAddr> = Vec::new();
     let mut ip_port: Option<i32> = None;
-    let mut cluster: Option<(String, String, i32)> = None;
-    let mut fqdn: Option<(String, i32)> = None;
+    let mut ip_tls: Option<bool> = None;
+    let mut cluster: Option<(String, String, i32, bool)> = None;
+    let mut fqdn: Option<(String, i32, bool)> = None;
 
-    for HostPort { host, port } in entries {
-        let (host, port) = (host.clone(), *port);
+    for HostPort { host, port, tls } in entries {
+        let (host, port, tls) = (host.clone(), *port, *tls);
         if let Ok(ip) = host.parse::<IpAddr>() {
             if ip_port.is_some_and(|p| p != port) {
                 warn!(
@@ -265,7 +352,15 @@ fn classify_entries(pang_name: &str, entries: &[HostPort], kind: BackendKind) ->
                 );
                 continue;
             }
+            if ip_tls.is_some_and(|t| t != tls) {
+                warn!(
+                    service = %pang_name,
+                    "pangolin service mixes http and https servers; using the first scheme"
+                );
+                continue;
+            }
             ip_port.get_or_insert(port);
+            ip_tls.get_or_insert(tls);
             ips.push(ip);
             continue;
         }
@@ -278,7 +373,7 @@ fn classify_entries(pang_name: &str, entries: &[HostPort], kind: BackendKind) ->
                 );
                 continue;
             }
-            cluster = Some((svc, ns, port));
+            cluster = Some((svc, ns, port, tls));
             continue;
         }
 
@@ -292,7 +387,7 @@ fn classify_entries(pang_name: &str, entries: &[HostPort], kind: BackendKind) ->
                     );
                     continue;
                 }
-                fqdn = Some((host, port));
+                fqdn = Some((host, port, tls));
             }
             BackendKind::Service => {
                 warn!(
@@ -321,17 +416,23 @@ fn classify_entries(pang_name: &str, entries: &[HostPort], kind: BackendKind) ->
         return Classification::Ips {
             entries: ips,
             port: ip_port.unwrap_or(80),
+            tls: ip_tls.unwrap_or(false),
         };
     }
-    if let Some((svc, ns, port)) = cluster {
+    if let Some((svc, ns, port, tls)) = cluster {
         return Classification::ClusterDns {
             service: svc,
             namespace: ns,
             port,
+            tls,
         };
     }
-    if let Some((hostname, port)) = fqdn {
-        return Classification::Fqdn { hostname, port };
+    if let Some((hostname, port, tls)) = fqdn {
+        return Classification::Fqdn {
+            hostname,
+            port,
+            tls,
+        };
     }
     Classification::Empty
 }
@@ -357,6 +458,25 @@ fn name_prefix(base: &str, infix: &str) -> String {
     }
 }
 
+/// Envoy `Backend.spec.tls` for an https target: skip verification when
+/// pangolin's serversTransport asked for it, otherwise system CAs with the
+/// hostname as SNI/SAN match (when there is a DNS hostname to match).
+fn backend_tls_settings(skip_verify: bool, sni: Option<String>) -> BackendTlsSettings {
+    if skip_verify {
+        BackendTlsSettings {
+            insecure_skip_verify: Some(true),
+            ..Default::default()
+        }
+    } else {
+        BackendTlsSettings {
+            well_known_ca_certificates: Some("System".into()),
+            sni,
+            ..Default::default()
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_ip_backend(
     cfg: &Config,
     pang_name: &str,
@@ -364,11 +484,38 @@ fn emit_ip_backend(
     port: i32,
     infix: &str,
     protocol: &str,
+    tls: Option<bool>,
     desired: &mut Desired,
 ) -> ResolvedBackend {
     match cfg.backend_kind {
         BackendKind::Service => {
-            emit_synthesized_service(cfg, pang_name, ips, port, infix, protocol, desired)
+            let resolved =
+                emit_synthesized_service(cfg, pang_name, ips, port, infix, protocol, desired);
+            if let Some(skip_verify) = tls {
+                if skip_verify {
+                    warn!(
+                        service = %pang_name,
+                        "insecureSkipVerify cannot be expressed via BackendTLSPolicy; the \
+                         certificate will be validated against system CAs (use \
+                         CONFIG_BACKEND_KIND=envoy-backend for skip-verify support)"
+                    );
+                } else {
+                    warn!(
+                        service = %pang_name,
+                        "verifying TLS to an IP target: the backend certificate must carry a \
+                         SAN matching the IP address"
+                    );
+                }
+                emit_backend_tls_policy(
+                    cfg,
+                    pang_name,
+                    infix,
+                    &resolved.name,
+                    &ips[0].to_string(),
+                    desired,
+                );
+            }
+            resolved
         }
         BackendKind::EnvoyBackend => {
             let endpoints = ips
@@ -381,7 +528,25 @@ fn emit_ip_backend(
                     fqdn: None,
                 })
                 .collect();
-            emit_envoy_backend(cfg, pang_name, endpoints, port, infix, desired)
+            let tls_settings = tls.map(|skip_verify| {
+                if !skip_verify {
+                    warn!(
+                        service = %pang_name,
+                        "verifying TLS to an IP target: the backend certificate must carry a \
+                         SAN matching the IP address"
+                    );
+                }
+                backend_tls_settings(skip_verify, None)
+            });
+            emit_envoy_backend(
+                cfg,
+                pang_name,
+                endpoints,
+                port,
+                infix,
+                tls_settings,
+                desired,
+            )
         }
     }
 }
@@ -392,6 +557,7 @@ fn emit_fqdn_backend(
     hostname: &str,
     port: i32,
     infix: &str,
+    tls: Option<bool>,
     desired: &mut Desired,
 ) -> ResolvedBackend {
     let endpoints = vec![BackendEndpoint {
@@ -401,7 +567,111 @@ fn emit_fqdn_backend(
             port,
         }),
     }];
-    emit_envoy_backend(cfg, pang_name, endpoints, port, infix, desired)
+    let tls_settings =
+        tls.map(|skip_verify| backend_tls_settings(skip_verify, Some(hostname.to_string())));
+    emit_envoy_backend(
+        cfg,
+        pang_name,
+        endpoints,
+        port,
+        infix,
+        tls_settings,
+        desired,
+    )
+}
+
+/// Cluster-DNS targets pass through as a direct Service backendRef — except
+/// when they need TLS in envoy-backend mode, where wrapping them in a Backend
+/// is the only way to express origination (incl. skip-verify).
+#[allow(clippy::too_many_arguments)]
+fn emit_cluster_dns_backend(
+    cfg: &Config,
+    pang_name: &str,
+    service: &str,
+    namespace: &str,
+    port: i32,
+    infix: &str,
+    tls: Option<bool>,
+    desired: &mut Desired,
+) -> ResolvedBackend {
+    let direct = ResolvedBackend {
+        group: String::new(),
+        kind: "Service".into(),
+        name: service.to_string(),
+        namespace: Some(namespace.to_string()),
+        port,
+    };
+    let Some(skip_verify) = tls else {
+        return direct;
+    };
+    let fqdn = format!("{service}.{namespace}.svc.cluster.local");
+
+    match cfg.backend_kind {
+        BackendKind::EnvoyBackend => emit_fqdn_backend(
+            cfg,
+            pang_name,
+            &fqdn,
+            port,
+            infix,
+            Some(skip_verify),
+            desired,
+        ),
+        BackendKind::Service => {
+            if skip_verify {
+                warn!(
+                    service = %pang_name,
+                    "insecureSkipVerify cannot be expressed via BackendTLSPolicy; the \
+                     certificate will be validated against system CAs (use \
+                     CONFIG_BACKEND_KIND=envoy-backend for skip-verify support)"
+                );
+            }
+            if namespace == cfg.namespace {
+                emit_backend_tls_policy(cfg, pang_name, infix, service, &fqdn, desired);
+            } else {
+                warn!(
+                    service = %pang_name,
+                    target = %fqdn,
+                    "https target Service lives in another namespace; BackendTLSPolicy must \
+                     be created there manually or TLS origination will not happen"
+                );
+            }
+            direct
+        }
+    }
+}
+
+/// `BackendTLSPolicy` (gateway.networking.k8s.io/v1) targeting a Service in
+/// the controller namespace: originate TLS, validate against system CAs, match
+/// SAN against `hostname`.
+fn emit_backend_tls_policy(
+    cfg: &Config,
+    pang_name: &str,
+    infix: &str,
+    target_service: &str,
+    hostname: &str,
+    desired: &mut Desired,
+) {
+    let name = prefixed_label(&name_prefix("btp", infix), pang_name);
+    let labels = owner_labels(cfg, &name);
+    let policy = BackendTLSPolicy {
+        metadata: managed_metadata(cfg, &name, labels),
+        spec: BackendTlsPolicySpec {
+            target_refs: vec![BackendTlsPolicyTargetRefs {
+                group: String::new(),
+                kind: "Service".into(),
+                name: target_service.to_string(),
+                section_name: None,
+            }],
+            validation: BackendTlsPolicyValidation {
+                hostname: hostname.to_string(),
+                well_known_ca_certificates: Some("System".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        status: None,
+    };
+    desired.backend_tls_policies.insert(name, policy);
 }
 
 fn emit_envoy_backend(
@@ -410,6 +680,7 @@ fn emit_envoy_backend(
     endpoints: Vec<BackendEndpoint>,
     port: i32,
     infix: &str,
+    tls: Option<BackendTlsSettings>,
     desired: &mut Desired,
 ) -> ResolvedBackend {
     let name = prefixed_label(&name_prefix("be", infix), pang_name);
@@ -417,7 +688,7 @@ fn emit_envoy_backend(
 
     let backend = Backend {
         metadata: managed_metadata(cfg, &name, labels),
-        spec: BackendSpec { endpoints },
+        spec: BackendSpec { endpoints, tls },
         // status field is not modeled (kube::CustomResource doesn't add one
         // when we don't declare it).
     };
@@ -517,7 +788,7 @@ mod tests {
     #[test]
     fn classifies_ipv4_service_mode() {
         match classify("svc", &[s("http://10.0.0.1:8080")], BackendKind::Service) {
-            Classification::Ips { entries, port } => {
+            Classification::Ips { entries, port, .. } => {
                 assert_eq!(entries.len(), 1);
                 assert_eq!(port, 8080);
             }
@@ -536,6 +807,7 @@ mod tests {
                 service,
                 namespace,
                 port,
+                ..
             } => {
                 assert_eq!(service, "echo");
                 assert_eq!(namespace, "foo");
@@ -556,6 +828,7 @@ mod tests {
                 service,
                 namespace,
                 port,
+                ..
             } => {
                 assert_eq!(service, "echo");
                 assert_eq!(namespace, "foo");
@@ -584,7 +857,7 @@ mod tests {
             &[s("https://api.example.com")],
             BackendKind::EnvoyBackend,
         ) {
-            Classification::Fqdn { hostname, port } => {
+            Classification::Fqdn { hostname, port, .. } => {
                 assert_eq!(hostname, "api.example.com");
                 assert_eq!(port, 443);
             }
@@ -630,6 +903,7 @@ mod tests {
                 service,
                 namespace,
                 port,
+                ..
             } => {
                 assert_eq!(service, "show");
                 assert_eq!(namespace, "dummyservices");

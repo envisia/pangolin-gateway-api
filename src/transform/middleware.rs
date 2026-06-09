@@ -54,40 +54,127 @@ pub fn build_filters(
             warn!(router, middleware = %name, "router references missing middleware");
             continue;
         };
-        if let Some(filter) = translate(router, name, mw) {
-            filters.push(filter);
-        }
+        filters.extend(translate(router, name, mw));
     }
-    filters
+    merge_filters(router, filters)
 }
 
-fn translate(router: &str, name: &str, mw: &Middleware) -> Option<HttpRouteRulesFilters> {
-    let obj = mw.as_object()?;
+/// Gateway API allows each of URLRewrite / RequestHeaderModifier /
+/// ResponseHeaderModifier **at most once per rule**, but several pangolin
+/// middlewares can map onto the same filter type (e.g. a custom Host header →
+/// URLRewrite.hostname next to an addPrefix → URLRewrite.path). Merge them.
+fn merge_filters(router: &str, filters: Vec<HttpRouteRulesFilters>) -> Vec<HttpRouteRulesFilters> {
+    let mut out: Vec<HttpRouteRulesFilters> = Vec::new();
+    let mut rewrite: Option<HttpRouteRulesFiltersUrlRewrite> = None;
+    let mut req_set: Vec<HttpRouteRulesFiltersRequestHeaderModifierSet> = Vec::new();
+    let mut resp_set: Vec<HttpRouteRulesFiltersResponseHeaderModifierSet> = Vec::new();
+
+    for f in filters {
+        match f.r#type {
+            HttpRouteRulesFiltersType::UrlRewrite => {
+                let Some(incoming) = f.url_rewrite else {
+                    continue;
+                };
+                let merged = rewrite.get_or_insert_with(Default::default);
+                if let Some(hostname) = incoming.hostname {
+                    if merged.hostname.replace(hostname).is_some() {
+                        warn!(
+                            router,
+                            "multiple hostname rewrites on one router; using the last"
+                        );
+                    }
+                }
+                if let Some(path) = incoming.path {
+                    if merged.path.is_some() {
+                        warn!(
+                            router,
+                            "multiple path rewrites on one router; keeping the first"
+                        );
+                    } else {
+                        merged.path = Some(path);
+                    }
+                }
+            }
+            HttpRouteRulesFiltersType::RequestHeaderModifier => {
+                if let Some(m) = f.request_header_modifier
+                    && let Some(set) = m.set
+                {
+                    req_set.extend(set);
+                }
+            }
+            HttpRouteRulesFiltersType::ResponseHeaderModifier => {
+                if let Some(m) = f.response_header_modifier
+                    && let Some(set) = m.set
+                {
+                    resp_set.extend(set);
+                }
+            }
+            _ => out.push(f),
+        }
+    }
+
+    if !req_set.is_empty() {
+        out.push(HttpRouteRulesFilters {
+            r#type: HttpRouteRulesFiltersType::RequestHeaderModifier,
+            request_header_modifier: Some(HttpRouteRulesFiltersRequestHeaderModifier {
+                set: Some(req_set),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+    if !resp_set.is_empty() {
+        out.push(HttpRouteRulesFilters {
+            r#type: HttpRouteRulesFiltersType::ResponseHeaderModifier,
+            response_header_modifier: Some(HttpRouteRulesFiltersResponseHeaderModifier {
+                set: Some(resp_set),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
+    if let Some(rw) = rewrite {
+        out.push(HttpRouteRulesFilters {
+            r#type: HttpRouteRulesFiltersType::UrlRewrite,
+            url_rewrite: Some(rw),
+            ..Default::default()
+        });
+    }
+    out
+}
+
+fn translate(router: &str, name: &str, mw: &Middleware) -> Vec<HttpRouteRulesFilters> {
+    let Some(obj) = mw.as_object() else {
+        return Vec::new();
+    };
     // Pangolin emits one top-level key per middleware kind.
-    let (kind, body) = obj.iter().next()?;
+    let Some((kind, body)) = obj.iter().next() else {
+        return Vec::new();
+    };
+    let single = |f: Option<HttpRouteRulesFilters>| f.into_iter().collect::<Vec<_>>();
     match kind.as_str() {
-        "redirectScheme" => translate_redirect_scheme(body),
+        "redirectScheme" => single(translate_redirect_scheme(body)),
         "headers" => translate_headers(body),
-        "addPrefix" => translate_add_prefix(body),
-        "replacePath" => translate_replace_path(body),
+        "addPrefix" => single(translate_add_prefix(body)),
+        "replacePath" => single(translate_replace_path(body)),
         "replacePathRegex" => {
             warn!(router, middleware = %name, "replacePathRegex is not supported by core Gateway API; skipping");
-            None
+            Vec::new()
         }
-        "stripPrefix" => translate_strip_prefix(body),
+        "stripPrefix" => single(translate_strip_prefix(body)),
         "plugin" if is_badger(mw) => {
             // Auth handling is decided per-route in route.rs (ext-authz
             // SecurityPolicy, explicit unauthenticated override, or skip) —
             // it is never a per-rule filter, so nothing to emit here.
-            None
+            Vec::new()
         }
         "plugin" => {
             warn!(router, middleware = %name, "plugin middlewares must be configured via Envoy Gateway policies; skipping");
-            None
+            Vec::new()
         }
         other => {
             warn!(router, middleware = %name, kind = %other, "unsupported middleware kind; skipping");
-            None
+            Vec::new()
         }
     }
 }
@@ -118,17 +205,31 @@ fn translate_redirect_scheme(body: &Value) -> Option<HttpRouteRulesFilters> {
     })
 }
 
-fn translate_headers(body: &Value) -> Option<HttpRouteRulesFilters> {
+fn translate_headers(body: &Value) -> Vec<HttpRouteRulesFilters> {
     // Traefik's headers middleware has many flavors; we map the two most common ones.
+    let mut filters = Vec::new();
     let mut req_set: Vec<HttpRouteRulesFiltersRequestHeaderModifierSet> = Vec::new();
     if let Some(map) = body.get("customRequestHeaders").and_then(Value::as_object) {
         for (k, v) in map {
-            if let Some(val) = v.as_str() {
-                req_set.push(HttpRouteRulesFiltersRequestHeaderModifierSet {
-                    name: k.clone(),
-                    value: val.to_string(),
+            let Some(val) = v.as_str() else { continue };
+            // Pangolin's "custom Host header" resource option arrives as a
+            // customRequestHeaders entry, but Gateway API forbids touching
+            // Host via RequestHeaderModifier — it is a URLRewrite concern.
+            if k.eq_ignore_ascii_case("host") {
+                filters.push(HttpRouteRulesFilters {
+                    r#type: HttpRouteRulesFiltersType::UrlRewrite,
+                    url_rewrite: Some(HttpRouteRulesFiltersUrlRewrite {
+                        hostname: Some(val.to_string()),
+                        path: None,
+                    }),
+                    ..Default::default()
                 });
+                continue;
             }
+            req_set.push(HttpRouteRulesFiltersRequestHeaderModifierSet {
+                name: k.clone(),
+                value: val.to_string(),
+            });
         }
     }
     let mut resp_set: Vec<HttpRouteRulesFiltersResponseHeaderModifierSet> = Vec::new();
@@ -144,7 +245,7 @@ fn translate_headers(body: &Value) -> Option<HttpRouteRulesFilters> {
     }
 
     if !req_set.is_empty() {
-        return Some(HttpRouteRulesFilters {
+        filters.push(HttpRouteRulesFilters {
             r#type: HttpRouteRulesFiltersType::RequestHeaderModifier,
             request_header_modifier: Some(HttpRouteRulesFiltersRequestHeaderModifier {
                 set: Some(req_set),
@@ -154,7 +255,7 @@ fn translate_headers(body: &Value) -> Option<HttpRouteRulesFilters> {
         });
     }
     if !resp_set.is_empty() {
-        return Some(HttpRouteRulesFilters {
+        filters.push(HttpRouteRulesFilters {
             r#type: HttpRouteRulesFiltersType::ResponseHeaderModifier,
             response_header_modifier: Some(HttpRouteRulesFiltersResponseHeaderModifier {
                 set: Some(resp_set),
@@ -163,7 +264,7 @@ fn translate_headers(body: &Value) -> Option<HttpRouteRulesFilters> {
             ..Default::default()
         });
     }
-    None
+    filters
 }
 
 fn translate_add_prefix(body: &Value) -> Option<HttpRouteRulesFilters> {

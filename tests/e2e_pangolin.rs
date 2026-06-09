@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use pangolin_gateway_controller::config::{BackendKind, Config};
+use pangolin_gateway_controller::health::Readiness;
 use pangolin_gateway_controller::{pangolin, reconcile};
 
 fn e2e_config(endpoint: &str, namespace: &str, parent_gateway: &str) -> Config {
@@ -77,6 +78,7 @@ fn e2e_config(endpoint: &str, namespace: &str, parent_gateway: &str) -> Config {
 
         read_only: false,
         log_traefik_config: true,
+        health_listen: None,
     }
 }
 
@@ -146,9 +148,16 @@ async fn controller_reconciles_real_pangolin() {
         let cfg = cfg.clone();
         let kube_client = kube_client.clone();
         let shutdown = shutdown.clone();
-        tokio::spawn(
-            async move { reconcile::run_loop(cfg, kube_client, pang_client, shutdown).await },
-        )
+        tokio::spawn(async move {
+            reconcile::run_loop(
+                cfg,
+                kube_client,
+                pang_client,
+                shutdown,
+                Readiness::default(),
+            )
+            .await
+        })
     };
 
     let route_api: Api<HTTPRoute> = Api::namespaced(kube_client.clone(), &namespace);
