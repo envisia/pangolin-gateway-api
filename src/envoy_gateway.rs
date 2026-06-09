@@ -36,7 +36,13 @@ pub struct BackendSpec {
 #[serde(rename_all = "camelCase")]
 pub struct BackendTlsSettings {
     /// `"System"` — validate against the proxy container's system CA pool.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// NB: explicit rename — serde's camelCase would produce
+    /// `wellKnownCaCertificates`, which the CRD (and SSA) rejects.
+    #[serde(
+        default,
+        rename = "wellKnownCACertificates",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub well_known_ca_certificates: Option<String>,
     /// Disable certificate validation entirely. Mirrors pangolin's
     /// `serversTransports[].insecureSkipVerify`.
@@ -128,4 +134,62 @@ pub struct ExtAuthBackendRef {
     pub namespace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<i32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The CRDs use acronym casing serde's `camelCase` can't derive — pin the
+    /// wire format so SSA against the real schemas keeps working.
+    #[test]
+    fn tls_settings_serialize_with_crd_field_names() {
+        let verified = BackendTlsSettings {
+            well_known_ca_certificates: Some("System".into()),
+            sni: Some("example.com".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&verified).unwrap();
+        assert!(json.get("wellKnownCACertificates").is_some(), "{json}");
+        assert!(json.get("sni").is_some());
+        assert!(json.get("insecureSkipVerify").is_none());
+
+        let skip = BackendTlsSettings {
+            insecure_skip_verify: Some(true),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&skip).unwrap();
+        assert!(json.get("insecureSkipVerify").is_some(), "{json}");
+        assert!(json.get("wellKnownCACertificates").is_none());
+    }
+
+    #[test]
+    fn security_policy_spec_serializes_with_crd_field_names() {
+        let spec = SecurityPolicySpec {
+            target_refs: vec![PolicyTargetRef {
+                group: "gateway.networking.k8s.io".into(),
+                kind: "HTTPRoute".into(),
+                name: "r".into(),
+            }],
+            ext_auth: Some(ExtAuth {
+                http: Some(HttpExtAuthService {
+                    backend_refs: vec![ExtAuthBackendRef {
+                        name: "shim".into(),
+                        namespace: None,
+                        port: Some(9001),
+                    }],
+                    path: None,
+                    headers_to_backend: None,
+                }),
+                headers_to_ext_auth: Some(vec!["cookie".into()]),
+                fail_open: Some(false),
+            }),
+        };
+        let json = serde_json::to_value(&spec).unwrap();
+        assert!(json.get("targetRefs").is_some(), "{json}");
+        let ext = json.get("extAuth").expect("extAuth");
+        assert!(ext.get("headersToExtAuth").is_some(), "{ext}");
+        assert!(ext.get("failOpen").is_some());
+        assert!(ext.get("http").and_then(|h| h.get("backendRefs")).is_some());
+    }
 }
