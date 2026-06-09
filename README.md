@@ -58,7 +58,10 @@ applies the additions/updates with [Server-Side Apply], and deletes orphans.
 | `middlewares.replacePath`                | HTTPRoute filter `URLRewrite{path.ReplaceFullPath}`                        |
 | `middlewares.replacePathRegex`           | not in core Gateway API – logged + skipped                                 |
 | `middlewares.plugin.badger`              | pangolin's auth plugin – configure via Envoy Gateway `SecurityPolicy` instead |
-| `tcp.*` / `udp.*`                        | not yet handled (planned: `TCPRoute` / `UDPRoute`)                         |
+| `tcp.routers[*]` (entrypoint `tcp-<port>`, rule `HostSNI(`*`)`) | `TCPRoute` + a `TCP` listener on port `<port>` (requires `CONFIG_ENABLE_TCP_ROUTES=true`) |
+| `tcp.routers[*]` with a concrete SNI or `tls` options | needs `TLSRoute` passthrough – logged + skipped              |
+| `udp.routers[*]` (entrypoint `udp-<port>`) | `UDPRoute` + a `UDP` listener on port `<port>` (requires `CONFIG_ENABLE_UDP_ROUTES=true`) |
+| `tcp.services` / `udp.services` `loadBalancer.servers[].address` | same IP / cluster-DNS / FQDN classification as HTTP backends (synthesized objects get a `-tcp-`/`-udp-` name infix and the right port protocol) |
 
 Unsupported rule constructs (`||` disjunction, `!` negation, `HostRegexp`,
 `Method`, `Headers`, …) cause the affected router to be **logged and skipped**
@@ -69,17 +72,42 @@ rather than silently misrouted.
 `CONFIG_BACKEND_KIND` selects how pangolin's IP/FQDN backends are represented
 in the cluster:
 
-| Value                | Emits                                                          | Portable? | Supports FQDN? |
-|----------------------|----------------------------------------------------------------|-----------|----------------|
-| `service` _(default)_| headless `Service` + `EndpointSlice` per pangolin service      | yes       | no             |
-| `envoy-backend`      | `gateway.envoyproxy.io/v1alpha1 Backend` per pangolin service  | **Envoy Gateway only** | yes  |
+| Value                       | Emits                                                          | Portable? | Supports FQDN? |
+|-----------------------------|----------------------------------------------------------------|-----------|----------------|
+| `envoy-backend` _(default)_ | `gateway.envoyproxy.io/v1alpha1 Backend` per pangolin service  | **Envoy Gateway only** | yes  |
+| `service`                   | headless `Service` + `EndpointSlice` per pangolin service      | yes       | no             |
 
 In either mode, pangolin URLs that point at a Kubernetes cluster Service
 (`<name>.<namespace>.svc[.cluster.local][:port]`) are passed through as a
 direct `Service` `backendRef` — the controller does not synthesize a duplicate.
 
-Pick the default unless you specifically want FQDN backends or the `Backend`
-CRD's other features (health checking via `BackendTrafficPolicy`, etc.).
+Pick the default (`envoy-backend`) unless you need portability to a non-Envoy
+Gateway API implementation — `Backend` supports FQDN targets and unlocks the
+CRD's other features (health checking via `BackendTrafficPolicy`, etc.), at
+the cost of being Envoy Gateway-specific.
+
+## Raw TCP/UDP resources
+
+Pangolin's "raw" resources arrive as `tcp`/`udp` blocks whose entrypoint names
+encode the public port (`tcp-234`, `udp-345`). With
+`CONFIG_ENABLE_TCP_ROUTES` / `CONFIG_ENABLE_UDP_ROUTES` set, each router
+becomes a `TCPRoute`/`UDPRoute` (experimental channel, `v1alpha2`) attached via
+`sectionName` to a `TCP`/`UDP` listener the controller adds to its
+ListenerSet. Envoy Gateway merges those listeners into the Gateway's
+LoadBalancer Service, so the ports surface on the existing Envoy LB.
+
+Both flags default to **off** because they have cluster-level prerequisites:
+
+- the Gateway API **experimental channel** CRDs (TCPRoute/UDPRoute),
+- an Envoy Gateway release that reconciles the graduated `ListenerSet` kind,
+- for UDP: a cloud LoadBalancer that accepts mixed TCP/UDP protocol Services
+  (otherwise leave UDP to gerbil's own Service and enable TCP only),
+- every raw-resource port added in pangolin mutates the cloud LB's port list —
+  expect slower propagation than in-cluster changes.
+
+Only `HostSNI(`*`)` TCP rules are translated; a concrete SNI (or `tls`
+options on the router) would need TLSRoute passthrough semantics and is logged
+and skipped instead.
 
 ## Certificate handling with cert-manager
 
@@ -176,9 +204,11 @@ upstream Go controller (`CONFIG_*`) where the concepts overlap.
 | `CONFIG_HTTP_PORT`                 | `80`                                        | Port for HTTP listeners on the ListenerSet                                  |
 | `CONFIG_HTTPS_PORT`                | `443`                                       | Port for HTTPS listeners on the ListenerSet                                 |
 | `CONFIG_ENABLE_HTTPS_LISTENERS`    | `true`                                      | Add an HTTPS listener per host when TLS is configured                       |
+| `CONFIG_ENABLE_TCP_ROUTES`         | `false`                                     | Translate pangolin's `tcp` block into TCPRoutes + TCP listeners. See [Raw TCP/UDP resources](#raw-tcpudp-resources) |
+| `CONFIG_ENABLE_UDP_ROUTES`         | `false`                                     | Translate pangolin's `udp` block into UDPRoutes + UDP listeners. See [Raw TCP/UDP resources](#raw-tcpudp-resources) |
 | `CONFIG_TLS_SECRET_TEMPLATE`       | _(unset)_                                   | Template for cert secret name. `{hostname}` and `{hostname-dashed}` placeholders. When unset, no HTTPS listener is created. |
 | `CONFIG_TLS_SECRET_NAMESPACE`      | controller namespace                        | Namespace where TLS Secrets live                                            |
-| `CONFIG_BACKEND_KIND`              | `service`                                   | `service` (default) or `envoy-backend`. See [Backend strategy](#backend-strategy) |
+| `CONFIG_BACKEND_KIND`              | `envoy-backend`                             | `envoy-backend` (default) or `service`. See [Backend strategy](#backend-strategy) |
 | `CONFIG_HTTPROUTE_ANNOTATIONS`     | _(unset)_                                   | `k=v,k=v` annotations stamped on every HTTPRoute. Typical: `cert-manager.io/cluster-issuer=letsencrypt-prod` |
 | `CONFIG_LISTENERSET_ANNOTATIONS`   | _(unset)_                                   | `k=v,k=v` annotations stamped on the ListenerSet                            |
 | `CONFIG_FIELD_MANAGER`             | `pangolin-gateway-controller`                 | Server-Side Apply field manager                                             |

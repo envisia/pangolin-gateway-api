@@ -9,12 +9,20 @@ kind: ClusterRole
 metadata:
   name: pangolin-gateway-controller
 rules:
-  # Gateway API objects we own.
+  # Gateway API objects we own. tcproutes/udproutes are only touched when
+  # CONFIG_ENABLE_TCP_ROUTES / CONFIG_ENABLE_UDP_ROUTES are set, but granting
+  # them unconditionally is safe — RBAC checks happen lazily.
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["httproutes", "listenersets"]
+    resources: ["httproutes", "listenersets", "tcproutes", "udproutes"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["httproutes/status", "listenersets/status"]
+    resources:
+      [
+        "httproutes/status",
+        "listenersets/status",
+        "tcproutes/status",
+        "udproutes/status",
+      ]
     verbs: ["get"]
   # Core resources we synthesize for IP-backed pangolin targets.
   - apiGroups: [""]

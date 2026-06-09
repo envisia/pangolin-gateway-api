@@ -24,6 +24,8 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "CONFIG_HTTP_PORT",
     "CONFIG_HTTPS_PORT",
     "CONFIG_ENABLE_HTTPS_LISTENERS",
+    "CONFIG_ENABLE_TCP_ROUTES",
+    "CONFIG_ENABLE_UDP_ROUTES",
     "CONFIG_BACKEND_KIND",
     "CONFIG_TLS_SECRET_TEMPLATE",
     "CONFIG_TLS_SECRET_NAMESPACE",
@@ -133,10 +135,12 @@ fn from_env_smoke() {
     assert_eq!(cfg.namespace, "default");
     assert_eq!(cfg.listener_set_name, "pangolin");
     assert_eq!(cfg.field_manager, "pangolin-gateway-controller");
-    assert_eq!(cfg.backend_kind, BackendKind::Service);
+    assert_eq!(cfg.backend_kind, BackendKind::EnvoyBackend);
     assert_eq!(cfg.http_port, 80);
     assert_eq!(cfg.https_port, 443);
     assert!(cfg.enable_https_listeners);
+    assert!(!cfg.enable_tcp_routes);
+    assert!(!cfg.enable_udp_routes);
     assert!(!cfg.tls_skip_verify);
     assert!(!cfg.read_only);
     assert!(cfg.httproute_annotations.is_empty());
@@ -160,7 +164,9 @@ fn from_env_smoke() {
     set("CONFIG_HTTP_PORT", "8080");
     set("CONFIG_HTTPS_PORT", "8443");
     set("CONFIG_ENABLE_HTTPS_LISTENERS", "false");
-    set("CONFIG_BACKEND_KIND", "envoy-backend");
+    set("CONFIG_ENABLE_TCP_ROUTES", "true");
+    set("CONFIG_ENABLE_UDP_ROUTES", "true");
+    set("CONFIG_BACKEND_KIND", "service");
     set("CONFIG_TLS_SECRET_TEMPLATE", "{hostname-dashed}-tls");
     set("CONFIG_TLS_SECRET_NAMESPACE", "certs");
     set(
@@ -188,7 +194,9 @@ fn from_env_smoke() {
     assert_eq!(cfg.http_port, 8080);
     assert_eq!(cfg.https_port, 8443);
     assert!(!cfg.enable_https_listeners);
-    assert_eq!(cfg.backend_kind, BackendKind::EnvoyBackend);
+    assert!(cfg.enable_tcp_routes);
+    assert!(cfg.enable_udp_routes);
+    assert_eq!(cfg.backend_kind, BackendKind::Service);
     assert_eq!(
         cfg.tls_secret_template.as_deref(),
         Some("{hostname-dashed}-tls")

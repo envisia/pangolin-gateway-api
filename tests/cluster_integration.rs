@@ -66,6 +66,8 @@ fn integration_config(
         http_port: 80,
         https_port: 443,
         enable_https_listeners: false,
+        enable_tcp_routes: false,
+        enable_udp_routes: false,
         backend_kind,
         tls_secret_template: None,
         tls_secret_namespace: None,

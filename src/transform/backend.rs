@@ -27,8 +27,9 @@ use url::Url;
 use crate::apply::{managed_metadata, owner_labels};
 use crate::config::{BackendKind, Config};
 use crate::envoy_gateway::{Backend, BackendEndpoint, BackendFqdn, BackendIp, BackendSpec};
-use crate::pangolin::types::{LoadBalancerServer, Service as PangService};
+use crate::pangolin::types::{L4Service, LoadBalancerServer, Service as PangService};
 use crate::transform::Desired;
+use crate::transform::l4::L4Protocol;
 use crate::transform::naming::prefixed_label;
 
 pub type BackendIndex = BTreeMap<String, ResolvedBackend>;
@@ -66,37 +67,94 @@ pub fn build_backends(
             continue;
         }
 
-        match classify(pang_name, &lb.servers, cfg.backend_kind) {
-            Classification::Empty => continue,
-            Classification::Ips { entries, port } => {
-                let resolved = emit_ip_backend(cfg, pang_name, &entries, port, desired);
-                index.insert(pang_name.clone(), resolved);
-            }
-            Classification::Fqdn { hostname, port } => {
-                // classify() only returns Fqdn in EnvoyBackend mode.
-                let resolved = emit_fqdn_backend(cfg, pang_name, &hostname, port, desired);
-                index.insert(pang_name.clone(), resolved);
-            }
-            Classification::ClusterDns {
-                service,
-                namespace,
-                port,
-            } => {
-                index.insert(
-                    pang_name.clone(),
-                    ResolvedBackend {
-                        group: String::new(),
-                        kind: "Service".into(),
-                        name: service,
-                        namespace: Some(namespace),
-                        port,
-                    },
-                );
-            }
+        let entries = parse_url_servers(pang_name, &lb.servers);
+        let classification = classify_entries(pang_name, &entries, cfg.backend_kind);
+        if let Some(resolved) = emit_backend(cfg, pang_name, classification, "", "TCP", desired) {
+            index.insert(pang_name.clone(), resolved);
         }
     }
 
     index
+}
+
+/// L4 sibling of [`build_backends`]: pangolin's `tcp`/`udp` services carry
+/// `address` (`host:port`) entries instead of URLs. Synthesized object names get
+/// a protocol infix (`be-tcp-…`) so a pangolin service name reused across the
+/// http/tcp/udp blocks can't collide, and `service`-mode stubs carry the right
+/// port protocol.
+pub fn build_l4_backends(
+    cfg: &Config,
+    services: &BTreeMap<String, L4Service>,
+    proto: L4Protocol,
+    desired: &mut Desired,
+) -> BackendIndex {
+    let mut index = BackendIndex::new();
+
+    for (pang_name, svc) in services {
+        let Some(lb) = svc.load_balancer.as_ref() else {
+            if svc.weighted.is_some() {
+                warn!(service = %pang_name, "weighted L4 services are not supported");
+            }
+            continue;
+        };
+        if lb.servers.is_empty() {
+            warn!(service = %pang_name, "pangolin L4 service has no servers; skipping");
+            continue;
+        }
+
+        let entries: Vec<HostPort> = lb
+            .servers
+            .iter()
+            .filter_map(|s| parse_l4_address(pang_name, &s.address))
+            .collect();
+        let classification = classify_entries(pang_name, &entries, cfg.backend_kind);
+        if let Some(resolved) = emit_backend(
+            cfg,
+            pang_name,
+            classification,
+            proto.infix(),
+            proto.k8s_protocol(),
+            desired,
+        ) {
+            index.insert(pang_name.clone(), resolved);
+        }
+    }
+
+    index
+}
+
+/// Dispatch a classification to the right emitter. `infix` distinguishes
+/// synthesized object names per traffic family (`""` for http, `"tcp"`/`"udp"`),
+/// `protocol` is the Kubernetes port protocol for Service/EndpointSlice stubs.
+fn emit_backend(
+    cfg: &Config,
+    pang_name: &str,
+    classification: Classification,
+    infix: &str,
+    protocol: &str,
+    desired: &mut Desired,
+) -> Option<ResolvedBackend> {
+    match classification {
+        Classification::Empty => None,
+        Classification::Ips { entries, port } => Some(emit_ip_backend(
+            cfg, pang_name, &entries, port, infix, protocol, desired,
+        )),
+        // classify_entries() only returns Fqdn in EnvoyBackend mode.
+        Classification::Fqdn { hostname, port } => Some(emit_fqdn_backend(
+            cfg, pang_name, &hostname, port, infix, desired,
+        )),
+        Classification::ClusterDns {
+            service,
+            namespace,
+            port,
+        } => Some(ResolvedBackend {
+            group: String::new(),
+            kind: "Service".into(),
+            name: service,
+            namespace: Some(namespace),
+            port,
+        }),
+    }
 }
 
 enum Classification {
@@ -116,12 +174,14 @@ enum Classification {
     },
 }
 
-fn classify(pang_name: &str, servers: &[LoadBalancerServer], kind: BackendKind) -> Classification {
-    let mut ips: Vec<IpAddr> = Vec::new();
-    let mut ip_port: Option<i32> = None;
-    let mut cluster: Option<(String, String, i32)> = None;
-    let mut fqdn: Option<(String, i32)> = None;
+/// A server target reduced to its host + port, whatever syntax it arrived in.
+struct HostPort {
+    host: String,
+    port: i32,
+}
 
+fn parse_url_servers(pang_name: &str, servers: &[LoadBalancerServer]) -> Vec<HostPort> {
+    let mut entries = Vec::new();
     for s in servers {
         let url = match Url::parse(&s.url) {
             Ok(u) => u,
@@ -144,7 +204,59 @@ fn classify(pang_name: &str, servers: &[LoadBalancerServer], kind: BackendKind) 
                 continue;
             }
         };
+        entries.push(HostPort { host, port });
+    }
+    entries
+}
 
+/// Parse a Traefik L4 server `address` (`host:port`, IPv6 in brackets). Pangolin
+/// has been seen prefixing a scheme even for UDP targets, so a leading
+/// `<scheme>://` is tolerated and stripped.
+fn parse_l4_address(pang_name: &str, address: &str) -> Option<HostPort> {
+    let trimmed = address.trim();
+    let without_scheme = match trimmed.split_once("://") {
+        Some((_, rest)) => rest,
+        None => trimmed,
+    };
+    let (host, port_str) = if let Some(rest) = without_scheme.strip_prefix('[') {
+        // Bracketed IPv6: [::1]:8080
+        let (host, after) = rest.split_once(']')?;
+        (host, after.strip_prefix(':'))
+    } else {
+        match without_scheme.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (without_scheme, None),
+        }
+    };
+    let Some(port_str) = port_str else {
+        warn!(service = %pang_name, address = %address, "L4 server address has no port; skipping");
+        return None;
+    };
+    let port: u16 = match port_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            warn!(service = %pang_name, address = %address, "L4 server address has an invalid port; skipping");
+            return None;
+        }
+    };
+    if host.is_empty() {
+        warn!(service = %pang_name, address = %address, "L4 server address has no host; skipping");
+        return None;
+    }
+    Some(HostPort {
+        host: host.to_string(),
+        port: i32::from(port),
+    })
+}
+
+fn classify_entries(pang_name: &str, entries: &[HostPort], kind: BackendKind) -> Classification {
+    let mut ips: Vec<IpAddr> = Vec::new();
+    let mut ip_port: Option<i32> = None;
+    let mut cluster: Option<(String, String, i32)> = None;
+    let mut fqdn: Option<(String, i32)> = None;
+
+    for HostPort { host, port } in entries {
+        let (host, port) = (host.clone(), *port);
         if let Ok(ip) = host.parse::<IpAddr>() {
             if ip_port.is_some_and(|p| p != port) {
                 warn!(
@@ -235,15 +347,29 @@ fn parse_cluster_dns(host: &str) -> Option<(String, String)> {
     Some((parts[0].to_string(), parts[1].to_string()))
 }
 
+/// `<base>-<infix>` when an infix is set, plain `<base>` otherwise. Keeps the
+/// established http-mode names (`be-…`, `svc-…`) stable.
+fn name_prefix(base: &str, infix: &str) -> String {
+    if infix.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}-{infix}")
+    }
+}
+
 fn emit_ip_backend(
     cfg: &Config,
     pang_name: &str,
     ips: &[IpAddr],
     port: i32,
+    infix: &str,
+    protocol: &str,
     desired: &mut Desired,
 ) -> ResolvedBackend {
     match cfg.backend_kind {
-        BackendKind::Service => emit_synthesized_service(cfg, pang_name, ips, port, desired),
+        BackendKind::Service => {
+            emit_synthesized_service(cfg, pang_name, ips, port, infix, protocol, desired)
+        }
         BackendKind::EnvoyBackend => {
             let endpoints = ips
                 .iter()
@@ -255,7 +381,7 @@ fn emit_ip_backend(
                     fqdn: None,
                 })
                 .collect();
-            emit_envoy_backend(cfg, pang_name, endpoints, port, desired)
+            emit_envoy_backend(cfg, pang_name, endpoints, port, infix, desired)
         }
     }
 }
@@ -265,6 +391,7 @@ fn emit_fqdn_backend(
     pang_name: &str,
     hostname: &str,
     port: i32,
+    infix: &str,
     desired: &mut Desired,
 ) -> ResolvedBackend {
     let endpoints = vec![BackendEndpoint {
@@ -274,7 +401,7 @@ fn emit_fqdn_backend(
             port,
         }),
     }];
-    emit_envoy_backend(cfg, pang_name, endpoints, port, desired)
+    emit_envoy_backend(cfg, pang_name, endpoints, port, infix, desired)
 }
 
 fn emit_envoy_backend(
@@ -282,9 +409,10 @@ fn emit_envoy_backend(
     pang_name: &str,
     endpoints: Vec<BackendEndpoint>,
     port: i32,
+    infix: &str,
     desired: &mut Desired,
 ) -> ResolvedBackend {
-    let name = prefixed_label("be", pang_name);
+    let name = prefixed_label(&name_prefix("be", infix), pang_name);
     let labels = owner_labels(cfg, &name);
 
     let backend = Backend {
@@ -310,10 +438,12 @@ fn emit_synthesized_service(
     pang_name: &str,
     ips: &[IpAddr],
     port: i32,
+    infix: &str,
+    protocol: &str,
     desired: &mut Desired,
 ) -> ResolvedBackend {
-    let svc_name = prefixed_label("svc", pang_name);
-    let slice_name = prefixed_label("eps", pang_name);
+    let svc_name = prefixed_label(&name_prefix("svc", infix), pang_name);
+    let slice_name = prefixed_label(&name_prefix("eps", infix), pang_name);
     let labels = owner_labels(cfg, &svc_name);
 
     let service = Service {
@@ -325,7 +455,7 @@ fn emit_synthesized_service(
                 name: Some(PORT_NAME.into()),
                 port,
                 target_port: Some(IntOrString::Int(port)),
-                protocol: Some("TCP".into()),
+                protocol: Some(protocol.into()),
                 ..Default::default()
             }]),
             ..Default::default()
@@ -351,7 +481,7 @@ fn emit_synthesized_service(
         ports: Some(vec![EndpointPort {
             name: Some(PORT_NAME.into()),
             port: Some(port),
-            protocol: Some("TCP".into()),
+            protocol: Some(protocol.into()),
             ..Default::default()
         }]),
     };
@@ -374,6 +504,14 @@ mod tests {
 
     fn s(url: &str) -> LoadBalancerServer {
         LoadBalancerServer { url: url.into() }
+    }
+
+    fn classify(
+        pang_name: &str,
+        servers: &[LoadBalancerServer],
+        kind: BackendKind,
+    ) -> Classification {
+        classify_entries(pang_name, &parse_url_servers(pang_name, servers), kind)
     }
 
     #[test]
@@ -451,6 +589,53 @@ mod tests {
                 assert_eq!(port, 443);
             }
             _ => panic!("expected Fqdn"),
+        }
+    }
+
+    #[test]
+    fn l4_address_plain_host_port() {
+        let hp = parse_l4_address("svc", "10.0.0.5:8000").expect("parsed");
+        assert_eq!(hp.host, "10.0.0.5");
+        assert_eq!(hp.port, 8000);
+    }
+
+    #[test]
+    fn l4_address_strips_stray_scheme() {
+        // Pangolin emits this shape for raw UDP resources.
+        let hp = parse_l4_address("svc", "http://echo.foo.svc.cluster.local:9090").expect("parsed");
+        assert_eq!(hp.host, "echo.foo.svc.cluster.local");
+        assert_eq!(hp.port, 9090);
+    }
+
+    #[test]
+    fn l4_address_bracketed_ipv6() {
+        let hp = parse_l4_address("svc", "[2001:db8::1]:53").expect("parsed");
+        assert_eq!(hp.host, "2001:db8::1");
+        assert_eq!(hp.port, 53);
+    }
+
+    #[test]
+    fn l4_address_requires_port() {
+        assert!(parse_l4_address("svc", "10.0.0.5").is_none());
+        assert!(parse_l4_address("svc", "host:notaport").is_none());
+        assert!(parse_l4_address("svc", ":8080").is_none());
+    }
+
+    #[test]
+    fn l4_cluster_dns_classifies_directly() {
+        let entries =
+            vec![parse_l4_address("svc", "show.dummyservices.svc.cluster.local:8000").unwrap()];
+        match classify_entries("svc", &entries, BackendKind::EnvoyBackend) {
+            Classification::ClusterDns {
+                service,
+                namespace,
+                port,
+            } => {
+                assert_eq!(service, "show");
+                assert_eq!(namespace, "dummyservices");
+                assert_eq!(port, 8000);
+            }
+            _ => panic!("expected ClusterDns"),
         }
     }
 }
