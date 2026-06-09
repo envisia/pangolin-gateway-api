@@ -88,7 +88,8 @@ selector and deletes names not present in the corresponding desired map.
   with `CONFIG_`** to mirror the Go controller. New options should follow that
   convention.
 - `src/pangolin/` — HTTP client (ETag/conditional-GET) and Traefik dynamic-config
-  serde types. TCP/UDP blocks are kept as opaque JSON, intentionally.
+  serde types. TCP/UDP blocks are typed (`L4Config`); their fields are defaulted
+  so malformed routers degrade to warn+skip instead of failing the whole parse.
 - `src/transform/` — pure functions. **Adding behaviour usually means editing
   here.**
   - `rule.rs` — Traefik rule parser. Only `Host(...)`, `PathPrefix(...)`,
@@ -106,16 +107,26 @@ selector and deletes names not present in the corresponding desired map.
        `Backend` with `endpoints[].fqdn`.
     4. Anything else → logged and skipped.
 
-    The dispatch is the only place that knows about `BackendKind`. Don't leak
-    that enum into `route.rs` — the route builder reads
-    `ResolvedBackend { group, kind, name, namespace, port }` and is mode-agnostic.
+    The dispatch is the only place that knows about `BackendKind` (default:
+    `EnvoyBackend`). Don't leak that enum into `route.rs` — the route builder
+    reads `ResolvedBackend { group, kind, name, namespace, port }` and is
+    mode-agnostic. `build_l4_backends` is the L4 twin: same classifier fed from
+    `address` (`host:port`, stray scheme tolerated) instead of `url`;
+    synthesized names get a `-tcp-`/`-udp-` infix and the right port protocol.
   - `middleware.rs` — small allow-list mapping `redirectScheme`, `headers`,
     `addPrefix`, `replacePath`, `stripPrefix` to Gateway API filters.
     `replacePathRegex` and pangolin's `badger` plugin are intentionally skipped.
   - `route.rs` — one `HTTPRoute` per pangolin router, parentRef = our
     `ListenerSet`.
+  - `l4.rs` — raw TCP/UDP resources → `TCPRoute`/`UDPRoute` plus `TCP`/`UDP`
+    listeners (gated on `CONFIG_ENABLE_TCP_ROUTES`/`CONFIG_ENABLE_UDP_ROUTES`,
+    both off by default). Port comes from the entrypoint name (`tcp-234`). Only
+    `HostSNI(\`*\`)` TCP rules are usable; concrete SNI / `tls` options need
+    TLSRoute and are logged + skipped. One listener per (protocol, port);
+    duplicate claims and collisions with the HTTP/HTTPS ports are skipped.
   - `listener.rs` — one `ListenerSet` aggregating every host. Optional HTTPS
-    listeners only when `CONFIG_TLS_SECRET_TEMPLATE` is set.
+    listeners only when `CONFIG_TLS_SECRET_TEMPLATE` is set; appends whatever
+    L4 listeners `l4.rs` produced.
   - `naming.rs` — DNS-1123 sanitization with a deterministic 32-bit hash
     suffix when truncating. **Don't rename objects without thinking about GC** —
     a name change means delete-then-create, not in-place update.
@@ -127,10 +138,11 @@ selector and deletes names not present in the corresponding desired map.
   doesn't ship these. Add new Envoy Gateway-specific CRDs here too.
 - `src/gc.rs` — generic sweep over `Api<T>` by the managed-by selector.
 - `src/reconcile.rs` — outer loop: fetch → if changed transform+apply+gc → wait.
-  Apply order is `Service → EndpointSlice → Backend → ListenerSet → HTTPRoute`.
-  GC happens after every successful apply round. The `Backend` sweep is gated
-  on `cfg.backend_kind == EnvoyBackend` — the CRD may not even be installed
-  when the controller runs in plain Gateway API mode, so we don't list it.
+  Apply order is `Service → EndpointSlice → Backend → ListenerSet → HTTPRoute →
+  TCPRoute → UDPRoute`. GC happens after every successful apply round. The
+  `Backend` sweep is gated on `cfg.backend_kind == EnvoyBackend`, and the
+  TCPRoute/UDPRoute sweeps on their enable flags — the CRDs may not even be
+  installed otherwise, so we don't list them.
 
 ## Configurable annotation hook
 

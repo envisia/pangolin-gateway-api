@@ -32,6 +32,8 @@ fn test_config() -> Config {
         http_port: 80,
         https_port: 443,
         enable_https_listeners: true,
+        enable_tcp_routes: true,
+        enable_udp_routes: true,
         backend_kind: BackendKind::Service,
         tls_secret_template: Some("{hostname-dashed}-tls".into()),
         tls_secret_namespace: None,
@@ -260,6 +262,186 @@ fn service_mode_drops_bare_fqdn() {
     assert!(desired.http_routes.is_empty());
     assert!(desired.services.is_empty());
     assert!(desired.envoy_backends.is_empty());
+}
+
+#[test]
+fn extended_fixture_emits_l4_routes() {
+    let cfg = test_config(); // enable_tcp_routes/enable_udp_routes are on
+    let dyn_config = load_fixture("pangolin-traefik-v3.5.0-extended.json");
+    let desired = build_desired(&cfg, &dyn_config);
+
+    // Fixture carries one raw TCP router (entrypoint tcp-234) and one raw UDP
+    // router (entrypoint udp-345), both targeting cluster-DNS services.
+    assert_eq!(desired.tcp_routes.len(), 1, "expected one TCPRoute");
+    assert_eq!(desired.udp_routes.len(), 1, "expected one UDPRoute");
+
+    let ls = desired.listener_sets.values().next().expect("listener set");
+    let tcp_listener = ls
+        .spec
+        .listeners
+        .iter()
+        .find(|l| l.protocol == "TCP")
+        .expect("TCP listener");
+    assert_eq!(tcp_listener.port, 234);
+    assert_eq!(tcp_listener.name, "tcp-234");
+    assert!(tcp_listener.hostname.is_none());
+    assert!(tcp_listener.tls.is_none());
+
+    let udp_listener = ls
+        .spec
+        .listeners
+        .iter()
+        .find(|l| l.protocol == "UDP")
+        .expect("UDP listener");
+    assert_eq!(udp_listener.port, 345);
+    assert_eq!(udp_listener.name, "udp-345");
+
+    let tcp_route = desired.tcp_routes.values().next().unwrap();
+    let parents = tcp_route.spec.parent_refs.as_ref().expect("parentRefs");
+    assert_eq!(parents.len(), 1);
+    assert_eq!(parents[0].kind.as_deref(), Some("ListenerSet"));
+    assert_eq!(parents[0].name, cfg.listener_set_name);
+    assert_eq!(parents[0].section_name.as_deref(), Some("tcp-234"));
+    let tcp_backend = &tcp_route.spec.rules[0].backend_refs[0];
+    assert_eq!(tcp_backend.kind.as_deref(), Some("Service"));
+    assert_eq!(tcp_backend.name, "show");
+    assert_eq!(tcp_backend.namespace.as_deref(), Some("dummyservices"));
+    assert_eq!(tcp_backend.port, Some(8000));
+
+    // The UDP fixture address carries a stray `http://` scheme — it must still
+    // classify as the cluster-DNS service behind it.
+    let udp_route = desired.udp_routes.values().next().unwrap();
+    let udp_backend = &udp_route.spec.rules[0].backend_refs[0];
+    assert_eq!(udp_backend.kind.as_deref(), Some("Service"));
+    assert_eq!(udp_backend.name, "itsnew");
+    assert_eq!(udp_backend.namespace.as_deref(), Some("dummyservices"));
+    assert_eq!(udp_backend.port, Some(9090));
+}
+
+#[test]
+fn l4_disabled_flags_drop_l4_blocks() {
+    let mut cfg = test_config();
+    cfg.enable_tcp_routes = false;
+    cfg.enable_udp_routes = false;
+    let dyn_config = load_fixture("pangolin-traefik-v3.5.0-extended.json");
+    let desired = build_desired(&cfg, &dyn_config);
+
+    assert!(desired.tcp_routes.is_empty());
+    assert!(desired.udp_routes.is_empty());
+    let ls = desired.listener_sets.values().next().expect("listener set");
+    assert!(
+        ls.spec
+            .listeners
+            .iter()
+            .all(|l| l.protocol == "HTTP" || l.protocol == "HTTPS"),
+        "no L4 listeners may be emitted when the flags are off"
+    );
+}
+
+#[test]
+fn l4_ip_backend_in_envoy_mode_emits_backend_crd() {
+    let mut cfg = test_config();
+    cfg.backend_kind = BackendKind::EnvoyBackend;
+
+    let dyn_config: TraefikDynamicConfig = serde_json::from_value(json!({
+        "tcp": {
+            "routers": {
+                "db-router": {
+                    "entryPoints": ["tcp-5432"],
+                    "service": "db-service",
+                    "rule": "HostSNI(`*`)"
+                }
+            },
+            "services": {
+                "db-service": {
+                    "loadBalancer": { "servers": [{ "address": "10.0.0.9:5432" }] }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let desired = build_desired(&cfg, &dyn_config);
+
+    assert!(desired.services.is_empty());
+    assert!(desired.endpoint_slices.is_empty());
+    assert_eq!(desired.envoy_backends.len(), 1);
+    let (be_name, be) = desired.envoy_backends.iter().next().unwrap();
+    assert!(
+        be_name.starts_with("be-tcp-"),
+        "L4 Backend names carry the protocol infix, got {be_name}"
+    );
+    let ip = be.spec.endpoints[0].ip.as_ref().expect("ip endpoint");
+    assert_eq!(ip.address, "10.0.0.9");
+    assert_eq!(ip.port, 5432);
+
+    let route = desired.tcp_routes.values().next().expect("TCPRoute");
+    let backend_ref = &route.spec.rules[0].backend_refs[0];
+    assert_eq!(backend_ref.group.as_deref(), Some("gateway.envoyproxy.io"));
+    assert_eq!(backend_ref.kind.as_deref(), Some("Backend"));
+    assert_eq!(backend_ref.name, *be_name);
+}
+
+#[test]
+fn l4_udp_ip_backend_in_service_mode_uses_udp_protocol() {
+    let cfg = test_config(); // service mode
+
+    let dyn_config: TraefikDynamicConfig = serde_json::from_value(json!({
+        "udp": {
+            "routers": {
+                "dns-router": {
+                    "entryPoints": ["udp-53"],
+                    "service": "dns-service"
+                }
+            },
+            "services": {
+                "dns-service": {
+                    "loadBalancer": { "servers": [{ "address": "10.0.0.53:53" }] }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let desired = build_desired(&cfg, &dyn_config);
+
+    assert_eq!(desired.udp_routes.len(), 1);
+    assert_eq!(desired.services.len(), 1);
+    let svc = desired.services.values().next().unwrap();
+    let port = &svc.spec.as_ref().unwrap().ports.as_ref().unwrap()[0];
+    assert_eq!(port.protocol.as_deref(), Some("UDP"));
+
+    let eps = desired.endpoint_slices.values().next().unwrap();
+    let eps_port = &eps.ports.as_ref().unwrap()[0];
+    assert_eq!(eps_port.protocol.as_deref(), Some("UDP"));
+}
+
+#[test]
+fn l4_concrete_sni_router_is_skipped() {
+    let cfg = test_config();
+    let dyn_config: TraefikDynamicConfig = serde_json::from_value(json!({
+        "tcp": {
+            "routers": {
+                "sni-router": {
+                    "entryPoints": ["tcp-8883"],
+                    "service": "mqtt-service",
+                    "rule": "HostSNI(`mqtt.example.com`)"
+                }
+            },
+            "services": {
+                "mqtt-service": {
+                    "loadBalancer": { "servers": [{ "address": "10.0.0.4:8883" }] }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let desired = build_desired(&cfg, &dyn_config);
+
+    assert!(
+        desired.tcp_routes.is_empty(),
+        "concrete SNI needs TLSRoute and must be skipped, not misrouted"
+    );
+    let ls = desired.listener_sets.values().next().expect("listener set");
+    assert!(ls.spec.listeners.iter().all(|l| l.protocol != "TCP"));
 }
 
 #[test]

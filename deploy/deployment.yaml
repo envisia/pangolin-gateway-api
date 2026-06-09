@@ -47,6 +47,19 @@ spec:
               value: "true"
             - name: CONFIG_TLS_SECRET_TEMPLATE
               value: "{hostname-dashed}-tls"
+            # Backend strategy. `envoy-backend` (the default) emits Envoy
+            # Gateway `Backend` CRDs for IP/FQDN targets; set to `service` for
+            # non-Envoy Gateway API implementations (loses FQDN support).
+            - name: CONFIG_BACKEND_KIND
+              value: "envoy-backend"
+            # Raw TCP/UDP resources -> TCPRoute/UDPRoute. Requires the Gateway
+            # API *experimental channel* CRDs and an Envoy Gateway version that
+            # reconciles the graduated ListenerSet kind. UDP additionally needs
+            # a cloud LB that supports mixed TCP/UDP protocol Services.
+            - name: CONFIG_ENABLE_TCP_ROUTES
+              value: "true"
+            - name: CONFIG_ENABLE_UDP_ROUTES
+              value: "false"
             # cert-manager wiring (optional). Annotations are forwarded as-is to the
             # objects the controller creates; cert-manager's gateway-shim then mints
             # the Secret referenced by the template above.

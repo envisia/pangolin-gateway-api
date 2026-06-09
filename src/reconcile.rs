@@ -6,6 +6,8 @@ use std::time::Duration;
 use anyhow::Result;
 use gateway_api::apis::experimental::httproutes::HTTPRoute;
 use gateway_api::apis::experimental::listenersets::ListenerSet;
+use gateway_api::apis::experimental::tcproutes::TCPRoute;
+use gateway_api::apis::experimental::udproutes::UDPRoute;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::Api;
@@ -72,6 +74,8 @@ pub async fn run_loop(
                         routers = dyn_config.http.routers.len(),
                         services = dyn_config.http.services.len(),
                         middlewares = dyn_config.http.middlewares.len(),
+                        tcp_routers = dyn_config.tcp.as_ref().map_or(0, |c| c.routers.len()),
+                        udp_routers = dyn_config.udp.as_ref().map_or(0, |c| c.routers.len()),
                         "pangolin: new configuration"
                     );
                     let desired = build_desired(&cfg, &dyn_config);
@@ -102,6 +106,8 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     let svc_api: Api<Service> = Api::namespaced(kube_client.clone(), ns);
     let eps_api: Api<EndpointSlice> = Api::namespaced(kube_client.clone(), ns);
     let be_api: Api<EnvoyBackend> = Api::namespaced(kube_client.clone(), ns);
+    let tcp_api: Api<TCPRoute> = Api::namespaced(kube_client.clone(), ns);
+    let udp_api: Api<UDPRoute> = Api::namespaced(kube_client.clone(), ns);
 
     // Apply backends first so HTTPRoute backendRefs resolve immediately.
     for svc in desired.services.values() {
@@ -120,6 +126,12 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     for route in desired.http_routes.values() {
         ssa_apply(&route_api, cfg, route).await?;
     }
+    for route in desired.tcp_routes.values() {
+        ssa_apply(&tcp_api, cfg, route).await?;
+    }
+    for route in desired.udp_routes.values() {
+        ssa_apply(&udp_api, cfg, route).await?;
+    }
 
     // GC anything we own that's no longer wanted.
     let route_names: BTreeSet<String> = desired.http_routes.keys().cloned().collect();
@@ -127,6 +139,8 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
     let svc_names: BTreeSet<String> = desired.services.keys().cloned().collect();
     let eps_names: BTreeSet<String> = desired.endpoint_slices.keys().cloned().collect();
     let be_names: BTreeSet<String> = desired.envoy_backends.keys().cloned().collect();
+    let tcp_names: BTreeSet<String> = desired.tcp_routes.keys().cloned().collect();
+    let udp_names: BTreeSet<String> = desired.udp_routes.keys().cloned().collect();
 
     if let Err(e) = gc::sweep(&route_api, cfg, &route_names).await {
         warn!(error = ?e, "GC HTTPRoute failed");
@@ -146,6 +160,18 @@ async fn reconcile_once(cfg: &Config, kube_client: &kube::Client, desired: &Desi
         && let Err(e) = gc::sweep(&be_api, cfg, &be_names).await
     {
         warn!(error = ?e, "GC Envoy Backend failed");
+    }
+    // TCPRoute/UDPRoute are experimental-channel CRDs; only list them when the
+    // corresponding feature is on, for the same may-not-be-installed reason.
+    if cfg.enable_tcp_routes
+        && let Err(e) = gc::sweep(&tcp_api, cfg, &tcp_names).await
+    {
+        warn!(error = ?e, "GC TCPRoute failed");
+    }
+    if cfg.enable_udp_routes
+        && let Err(e) = gc::sweep(&udp_api, cfg, &udp_names).await
+    {
+        warn!(error = ?e, "GC UDPRoute failed");
     }
     Ok(())
 }

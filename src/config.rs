@@ -24,6 +24,14 @@ pub struct Config {
     pub https_port: i32,
     pub enable_https_listeners: bool,
 
+    /// Translate pangolin's `tcp` block into TCPRoutes + TCP listeners.
+    /// Requires the Gateway API experimental-channel CRDs (TCPRoute is v1alpha2).
+    pub enable_tcp_routes: bool,
+    /// Translate pangolin's `udp` block into UDPRoutes + UDP listeners.
+    /// Adds UDP ports to the Envoy LoadBalancer Service — the cloud LB must
+    /// support mixed TCP/UDP protocols for this to provision.
+    pub enable_udp_routes: bool,
+
     /// Which Kubernetes object kind backs an HTTPRoute's IP/FQDN targets.
     pub backend_kind: BackendKind,
 
@@ -65,7 +73,10 @@ pub enum BackendKind {
     /// Portable across every Gateway API implementation.
     Service,
     /// Emit a `gateway.envoyproxy.io/v1alpha1` `Backend` CRD. Envoy Gateway only,
-    /// but unlocks FQDN targets as well as IPs.
+    /// but unlocks FQDN targets as well as IPs. This is the default — the
+    /// controller targets Envoy Gateway, and `Backend` avoids synthesizing
+    /// Service/EndpointSlice stubs. Set `CONFIG_BACKEND_KIND=service` for
+    /// portability to other Gateway API implementations.
     EnvoyBackend,
 }
 
@@ -119,9 +130,11 @@ impl Config {
             http_port: i32_env("CONFIG_HTTP_PORT", 80)?,
             https_port: i32_env("CONFIG_HTTPS_PORT", 443)?,
             enable_https_listeners: bool_env("CONFIG_ENABLE_HTTPS_LISTENERS", true)?,
+            enable_tcp_routes: bool_env("CONFIG_ENABLE_TCP_ROUTES", false)?,
+            enable_udp_routes: bool_env("CONFIG_ENABLE_UDP_ROUTES", false)?,
             backend_kind: match optional_env("CONFIG_BACKEND_KIND") {
                 Some(raw) => BackendKind::parse(&raw)?,
-                None => BackendKind::Service,
+                None => BackendKind::EnvoyBackend,
             },
             tls_secret_template: optional_env("CONFIG_TLS_SECRET_TEMPLATE"),
             tls_secret_namespace: optional_env("CONFIG_TLS_SECRET_NAMESPACE"),

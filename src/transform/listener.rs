@@ -1,6 +1,7 @@
 //! Aggregate every hostname seen in routes into a single ListenerSet attached to the
 //! configured parent Gateway. One HTTP listener per host, plus an HTTPS listener when
-//! a TLS secret template is configured.
+//! a TLS secret template is configured, plus any TCP/UDP listeners contributed by the
+//! L4 transform.
 
 use gateway_api::apis::experimental::listenersets::{
     ListenerSet, ListenerSetListeners, ListenerSetListenersTls,
@@ -14,7 +15,12 @@ use crate::transform::Desired;
 use crate::transform::naming::dns_label;
 use crate::transform::route::RouteIndex;
 
-pub fn build_listener_set(cfg: &Config, routes: &RouteIndex, desired: &mut Desired) {
+pub fn build_listener_set(
+    cfg: &Config,
+    routes: &RouteIndex,
+    l4_listeners: Vec<ListenerSetListeners>,
+    desired: &mut Desired,
+) {
     let mut listeners: Vec<ListenerSetListeners> = Vec::new();
 
     for host in &routes.hostnames {
@@ -50,6 +56,8 @@ pub fn build_listener_set(cfg: &Config, routes: &RouteIndex, desired: &mut Desir
             });
         }
     }
+
+    listeners.extend(l4_listeners);
 
     let name = dns_label(&cfg.listener_set_name);
     let labels = owner_labels(cfg, &name);

@@ -19,12 +19,67 @@ use serde_json::Value;
 pub struct TraefikDynamicConfig {
     #[serde(default)]
     pub http: HttpConfig,
-    /// Opaque TCP block. Reserved for future TCPRoute support.
+    /// Raw TCP resources. Translated to Gateway API `TCPRoute` when
+    /// `CONFIG_ENABLE_TCP_ROUTES=true`.
     #[serde(default)]
-    pub tcp: Option<Value>,
-    /// Opaque UDP block. Reserved for future UDPRoute support.
+    pub tcp: Option<L4Config>,
+    /// Raw UDP resources. Translated to Gateway API `UDPRoute` when
+    /// `CONFIG_ENABLE_UDP_ROUTES=true`.
     #[serde(default)]
-    pub udp: Option<Value>,
+    pub udp: Option<L4Config>,
+}
+
+/// Shared shape of Traefik's `tcp` and `udp` dynamic-config blocks as pangolin
+/// emits them for "raw" resources (`server/lib/traefik/getTraefikConfig.ts`).
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct L4Config {
+    #[serde(default)]
+    pub routers: BTreeMap<String, L4Router>,
+    #[serde(default)]
+    pub services: BTreeMap<String, L4Service>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct L4Router {
+    /// TCP routers carry `HostSNI(`*`)`; UDP routers have no rule at all.
+    #[serde(default)]
+    pub rule: Option<String>,
+    /// Defaulted (not required) so a malformed router degrades to a warn+skip
+    /// instead of failing deserialization of the whole config.
+    #[serde(default)]
+    pub service: String,
+    /// Pangolin encodes the public port in the entrypoint name: `tcp-<port>` / `udp-<port>`.
+    #[serde(default)]
+    pub entry_points: Vec<String>,
+    /// TLS passthrough options. Presence means the router needs TLSRoute
+    /// semantics, which we don't support yet — kept opaque.
+    #[serde(default)]
+    pub tls: Option<Value>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct L4Service {
+    #[serde(default, rename = "loadBalancer")]
+    pub load_balancer: Option<L4LoadBalancer>,
+    /// Unhandled variants, kept so we can warn instead of silently dropping.
+    #[serde(default)]
+    pub weighted: Option<Value>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct L4LoadBalancer {
+    #[serde(default)]
+    pub servers: Vec<L4Server>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct L4Server {
+    /// Traefik L4 servers use `address` (`host:port`), not the HTTP `url` field.
+    /// Pangolin has been seen emitting a stray scheme prefix here — strip it
+    /// before parsing.
+    #[serde(default)]
+    pub address: String,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]

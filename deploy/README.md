@@ -10,15 +10,20 @@ and as a component from sibling infrastructure repos.
 | File | Resource | Notes |
 |---|---|---|
 | `namespace.yaml` | `Namespace/pangolin-system` | Drop this if the namespace is created elsewhere — see [Embedding from another kustomization](#embedding-from-another-kustomization). |
-| `rbac.yaml` | `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` | Cluster-wide read on Gateways; write on HTTPRoute / ListenerSet / Service / EndpointSlice / Envoy Gateway `Backend`. |
+| `rbac.yaml` | `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` | Cluster-wide read on Gateways; write on HTTPRoute / TCPRoute / UDPRoute / ListenerSet / Service / EndpointSlice / Envoy Gateway `Backend`. |
 | `deployment.yaml` | `Deployment/pangolin-gateway-controller` | Single replica, read-only rootfs, all caps dropped. |
 
 The CRDs are **not** installed here. You need:
 
-- Gateway API v1.5+ **experimental** channel (for `ListenerSet`):
+- Gateway API v1.5+ **experimental** channel (for `ListenerSet`, and for
+  `TCPRoute`/`UDPRoute` when the L4 flags are on):
   `kubectl apply -k https://github.com/kubernetes-sigs/gateway-api/config/crd/experimental?ref=v1.5.1`
-- Envoy Gateway, if you set `CONFIG_BACKEND_KIND=envoy-backend`:
-  see <https://gateway.envoyproxy.io/docs/install/>.
+- Envoy Gateway (required for the default `CONFIG_BACKEND_KIND=envoy-backend`,
+  and the implementation this controller targets):
+  see <https://gateway.envoyproxy.io/docs/install/>. For
+  `CONFIG_ENABLE_TCP_ROUTES`/`CONFIG_ENABLE_UDP_ROUTES`, use an Envoy Gateway
+  release that reconciles the graduated `ListenerSet` kind
+  (`gateway.networking.k8s.io`, not the legacy `XListenerSet`).
 
 A `Gateway` object the controller can attach its `ListenerSet` to must exist
 before the controller will produce useful output. The default config points at a
@@ -67,8 +72,10 @@ that file for authoritative defaults.
 | `CONFIG_PARENT_GATEWAY_NAMESPACE` | same as `CONFIG_NAMESPACE` | Namespace of the parent `Gateway`. |
 | `CONFIG_LISTENERSET_NAME` | `pangolin` | Name of the `ListenerSet` the controller manages. |
 | `CONFIG_POLL_INTERVAL` | `30s` | How often to poll pangolin. ETag + sha256 short-circuit keep idle polls cheap. |
-| `CONFIG_BACKEND_KIND` | `service` | `service` (synthesize headless `Service` + `EndpointSlice`) or `envoy-backend` (emit Envoy Gateway `Backend` CRD). |
+| `CONFIG_BACKEND_KIND` | `envoy-backend` | `envoy-backend` (emit Envoy Gateway `Backend` CRD) or `service` (synthesize headless `Service` + `EndpointSlice`; portable, no FQDN support). |
 | `CONFIG_ENABLE_HTTPS_LISTENERS` | `false` | Whether to add HTTPS listeners to the `ListenerSet`. |
+| `CONFIG_ENABLE_TCP_ROUTES` | `false` | Translate pangolin's raw TCP resources into `TCPRoute`s + `TCP` listeners. Each `tcp-<port>` entrypoint becomes a port on the Envoy LoadBalancer Service. |
+| `CONFIG_ENABLE_UDP_ROUTES` | `false` | Same for raw UDP resources / `UDPRoute`. The cloud LB must support mixed TCP+UDP Services; if it doesn't, leave this off. |
 | `CONFIG_TLS_SECRET_TEMPLATE` | _(unset)_ | Required when HTTPS listeners are on. Supports `{hostname}` and `{hostname-dashed}` placeholders. |
 | `CONFIG_HTTPROUTE_ANNOTATIONS` | _(empty)_ | `k=v,k=v` annotations stamped onto every `HTTPRoute`. Typical use: cert-manager cluster-issuer. |
 | `CONFIG_LISTENERSET_ANNOTATIONS` | _(empty)_ | Same for `ListenerSet`. |
