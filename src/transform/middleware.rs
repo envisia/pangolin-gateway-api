@@ -20,6 +20,29 @@ use tracing::warn;
 
 use crate::pangolin::types::Middleware;
 
+/// True when the router references pangolin's `badger` auth plugin — i.e. the
+/// resource is (potentially) protected by pangolin's SSO/password/PIN auth.
+/// A referenced-but-missing middleware literally named `badger` is treated as
+/// protected too: better to skip a route than to expose a protected resource.
+pub fn requires_badger_auth(
+    middleware_names: &[String],
+    middlewares: &BTreeMap<String, Middleware>,
+) -> bool {
+    middleware_names
+        .iter()
+        .any(|name| match middlewares.get(name) {
+            Some(mw) => is_badger(mw),
+            None => name == "badger",
+        })
+}
+
+fn is_badger(mw: &Middleware) -> bool {
+    mw.as_object()
+        .and_then(|obj| obj.get("plugin"))
+        .and_then(Value::as_object)
+        .is_some_and(|plugin| plugin.contains_key("badger"))
+}
+
 pub fn build_filters(
     router: &str,
     middleware_names: &[String],
@@ -52,8 +75,14 @@ fn translate(router: &str, name: &str, mw: &Middleware) -> Option<HttpRouteRules
             None
         }
         "stripPrefix" => translate_strip_prefix(body),
+        "plugin" if is_badger(mw) => {
+            // Auth handling is decided per-route in route.rs (ext-authz
+            // SecurityPolicy, explicit unauthenticated override, or skip) —
+            // it is never a per-rule filter, so nothing to emit here.
+            None
+        }
         "plugin" => {
-            warn!(router, middleware = %name, "plugin middlewares (e.g. badger) must be configured via Envoy Gateway policies; skipping");
+            warn!(router, middleware = %name, "plugin middlewares must be configured via Envoy Gateway policies; skipping");
             None
         }
         other => {

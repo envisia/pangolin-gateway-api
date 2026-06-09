@@ -35,10 +35,11 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways", "gatewayclasses"]
     verbs: ["get", "list", "watch"]
-  # Envoy Gateway's Backend CRD. Only used when CONFIG_BACKEND_KIND=envoy-backend.
-  # Safe to leave granted even when unused — RBAC checks happen lazily.
+  # Envoy Gateway CRDs. Backend is used when CONFIG_BACKEND_KIND=envoy-backend
+  # (the default); SecurityPolicy when CONFIG_EXT_AUTHZ_SERVICE is set. Safe to
+  # leave granted even when unused — RBAC checks happen lazily.
   - apiGroups: ["gateway.envoyproxy.io"]
-    resources: ["backends"]
+    resources: ["backends", "securitypolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

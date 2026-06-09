@@ -21,12 +21,17 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 COPY tests ./tests
-RUN cargo build --release --bin pangolin-gateway-controller \
- && strip target/release/pangolin-gateway-controller
+RUN cargo build --release --bin pangolin-gateway-controller --bin badger-ext-authz-shim \
+ && strip target/release/pangolin-gateway-controller target/release/badger-ext-authz-shim
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=builder --chown=65532:65532 --chmod=0555 \
     /work/target/release/pangolin-gateway-controller \
     /usr/local/bin/pangolin-gateway-controller
+# The badger ext-authz shim ships in the same image; run it by overriding the
+# container command (see deploy/badger-shim.yaml).
+COPY --from=builder --chown=65532:65532 --chmod=0555 \
+    /work/target/release/badger-ext-authz-shim \
+    /usr/local/bin/badger-ext-authz-shim
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/pangolin-gateway-controller"]

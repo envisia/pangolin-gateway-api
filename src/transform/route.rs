@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::pangolin::TraefikDynamicConfig;
 use crate::transform::Desired;
 use crate::transform::backend::BackendIndex;
+use crate::transform::ext_authz;
 use crate::transform::middleware;
 use crate::transform::naming::prefixed_label;
 use crate::transform::rule::{self, PathMatchKind};
@@ -48,6 +49,32 @@ pub fn build_routes(
                 "router rule cannot be translated to Gateway API; skipping"
             );
             continue;
+        }
+
+        // Pangolin marks auth-enforced resources by attaching its `badger`
+        // plugin middleware. Envoy can't run that plugin, so the route must be
+        // covered by an ext-authz SecurityPolicy — or explicitly allowed to go
+        // out unauthenticated — or it is skipped. Emitting it silently would
+        // expose SSO/password/PIN-protected resources to the world.
+        let protected =
+            middleware::requires_badger_auth(&router.middlewares, &dyn_config.http.middlewares);
+        if protected && cfg.ext_authz.is_none() {
+            if cfg.allow_unauthenticated_routes {
+                warn!(
+                    router = %router_name,
+                    "auth-protected router emitted WITHOUT authentication \
+                     (CONFIG_ALLOW_UNAUTHENTICATED_ROUTES=true)"
+                );
+            } else {
+                warn!(
+                    router = %router_name,
+                    "router is protected by pangolin auth (badger) but no ext-authz service is \
+                     configured; skipping. Set CONFIG_EXT_AUTHZ_SERVICE to wire it to an \
+                     external authorization service, or CONFIG_ALLOW_UNAUTHENTICATED_ROUTES=true \
+                     to expose it without auth"
+                );
+                continue;
+            }
         }
 
         let backend = match backends.get(&router.service) {
@@ -142,6 +169,12 @@ pub fn build_routes(
             {
                 index.https_hosts.insert(host.clone());
             }
+        }
+
+        if protected && let Some(ea) = &cfg.ext_authz {
+            let sp = ext_authz::build_security_policy(cfg, ea, &route_name);
+            let sp_name = sp.metadata.name.clone().expect("policy has a name");
+            desired.security_policies.insert(sp_name, sp);
         }
 
         desired.http_routes.insert(route_name, route);
