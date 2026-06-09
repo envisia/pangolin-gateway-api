@@ -11,4 +11,5 @@ pub mod envoy_gateway;
 pub mod gc;
 pub mod pangolin;
 pub mod reconcile;
+pub mod shim;
 pub mod transform;

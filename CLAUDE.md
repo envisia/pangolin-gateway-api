@@ -146,6 +146,12 @@ selector and deletes names not present in the corresponding desired map.
   `Backend` and `SecurityPolicy` CRDs (`gateway.envoyproxy.io/v1alpha1`). The
   `gateway-api` crate doesn't ship these. Add new Envoy Gateway-specific CRDs
   here too.
+- `src/shim.rs` + `src/bin/badger_ext_authz_shim.rs` — the badger ext-authz
+  shim (second binary, same image): Envoy HTTP ext-authz ⇄ pangolin
+  `badger/verify-session` + `badger/exchange-session`. Wire types mirror
+  pangolin's zod schemas in `server/routers/badger/` — check those before
+  changing field names. Env prefix is `SHIM_`, not `CONFIG_`. Fails closed
+  (503) when pangolin is unreachable.
 - `src/gc.rs` — generic sweep over `Api<T>` by the managed-by selector.
 - `src/reconcile.rs` — outer loop: fetch → if changed transform+apply+gc → wait.
   Apply order is `Service → EndpointSlice → Backend → ListenerSet → HTTPRoute →

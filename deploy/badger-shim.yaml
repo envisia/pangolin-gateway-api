@@ -1,0 +1,96 @@
+# Badger ext-authz shim: verifies pangolin sessions for Envoy Gateway's
+# external authorization filter. Deploy it alongside the controller and set
+#
+#   CONFIG_EXT_AUTHZ_SERVICE=pangolin-badger-shim
+#   CONFIG_EXT_AUTHZ_PORT=9001
+#   CONFIG_EXT_AUTHZ_PATH=/verify
+#
+# on the controller so badger-protected routes get a SecurityPolicy pointing
+# here. NOT part of kustomization.yaml by default — add it to `resources:`
+# once SHIM_PANGOLIN_API_BASE_URL matches your pangolin install.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pangolin-badger-shim
+  namespace: pangolin-system
+  labels:
+    app.kubernetes.io/name: pangolin-badger-shim
+spec:
+  # The shim is stateless; scale freely.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pangolin-badger-shim
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pangolin-badger-shim
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: shim
+          image: ghcr.io/envisia/pangolin-gateway-controller:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/badger-ext-authz-shim"]
+          env:
+            # --- required ---
+            # Same value pangolin hands to badger as `apiBaseUrl`.
+            - name: SHIM_PANGOLIN_API_BASE_URL
+              value: "http://pangolin.pangolin-system.svc.cluster.local:3001/api/v1"
+            # --- optional (defaults shown) ---
+            # - name: SHIM_LISTEN
+            #   value: "0.0.0.0:9001"
+            # Must match the controller's CONFIG_EXT_AUTHZ_PATH.
+            # - name: SHIM_PATH_PREFIX
+            #   value: "/verify"
+            # - name: SHIM_USER_SESSION_COOKIE_NAME
+            #   value: "p_session_token"
+            # - name: SHIM_RESOURCE_SESSION_REQUEST_PARAM
+            #   value: "p_session_request"
+            # - name: SHIM_PANGOLIN_TIMEOUT
+            #   value: "10s"
+            - name: RUST_LOG
+              value: "info"
+          ports:
+            - name: http
+              containerPort: 9001
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pangolin-badger-shim
+  namespace: pangolin-system
+  labels:
+    app.kubernetes.io/name: pangolin-badger-shim
+spec:
+  selector:
+    app.kubernetes.io/name: pangolin-badger-shim
+  ports:
+    - name: http
+      port: 9001
+      targetPort: http

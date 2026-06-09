@@ -118,13 +118,12 @@ as follows:
 
 1. **`CONFIG_EXT_AUTHZ_SERVICE` set (recommended):** every protected
    `HTTPRoute` gets an Envoy Gateway `SecurityPolicy` whose `extAuth.http`
-   points at that service. The service must speak Envoy's HTTP external
-   authorization protocol and verify pangolin sessions — typically a small
-   shim in front of pangolin's badger verification API that answers 2xx for a
-   valid session and a redirect to the auth portal otherwise. Policies are
-   emitted with `failOpen: false`: if the auth service is down, protected
-   resources stay closed. The session cookie and `Authorization` header are
-   forwarded by default (`CONFIG_EXT_AUTHZ_HEADERS_TO_EXT_AUTH`).
+   points at that service. This repo ships exactly that service: the
+   **badger ext-authz shim** (`badger-ext-authz-shim`, second binary in the
+   controller image — see [The badger ext-authz shim](#the-badger-ext-authz-shim)).
+   Policies are emitted with `failOpen: false`: if the auth service is down,
+   protected resources stay closed. The session cookie and `Authorization`
+   header are forwarded by default (`CONFIG_EXT_AUTHZ_HEADERS_TO_EXT_AUTH`).
 2. **Nothing configured (the default):** protected routers are **skipped**
    with a warning. This is deliberate — emitting them would silently expose
    SSO/password/PIN-protected resources to the internet. Redirect-only routers
@@ -134,6 +133,35 @@ as follows:
    resource is intentionally public.
 
 Raw TCP/UDP resources are not affected — pangolin does not apply badger at L4.
+
+### The badger ext-authz shim
+
+`badger-ext-authz-shim` bridges Envoy's HTTP external-authorization protocol
+to pangolin's badger session API (the same endpoints the upstream Traefik
+plugin uses). Per Envoy's contract the check request preserves the original
+request's method, `Host` and path (prefixed with `CONFIG_EXT_AUTHZ_PATH`), and
+on a non-2xx answer Envoy forwards the shim's status and headers — including
+`Location` and `Set-Cookie` — to the client. That gives the full badger flow:
+
+| Situation | Shim answer | Client sees |
+|---|---|---|
+| valid session (`verify-session`) | `200` + `Remote-User`/`Remote-Email`/… | request reaches the backend |
+| no/invalid session, portal known | `302` + `Location` | redirect to the pangolin auth portal |
+| post-login handoff (`?p_session_request=…`) | exchange via `exchange-session`, then `302` back to the cleaned URL + `Set-Cookie` | logged-in session on the resource domain |
+| header-auth challenge | `401` + `WWW-Authenticate: Basic` | basic-auth prompt |
+| pangolin unreachable | `503` | denied — auth outages **fail closed** |
+
+Configuration (env, all prefixed `SHIM_`): `SHIM_PANGOLIN_API_BASE_URL`
+(required — the `apiBaseUrl` pangolin hands to badger),
+`SHIM_LISTEN` (`0.0.0.0:9001`), `SHIM_PATH_PREFIX` (`/verify`, must equal
+`CONFIG_EXT_AUTHZ_PATH`), `SHIM_USER_SESSION_COOKIE_NAME` (`p_session_token`),
+`SHIM_RESOURCE_SESSION_REQUEST_PARAM` (`p_session_request`),
+`SHIM_PANGOLIN_TIMEOUT` (`10s`). A ready-to-adapt Deployment + Service lives
+in [`deploy/badger-shim.yaml`](deploy/badger-shim.yaml).
+
+To pass the verified identity on to backends, list the shim's response
+headers in `CONFIG_EXT_AUTHZ_HEADERS_TO_BACKEND`
+(e.g. `remote-user,remote-email`).
 
 ## Certificate handling with cert-manager
 

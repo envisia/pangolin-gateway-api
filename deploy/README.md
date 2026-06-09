@@ -10,6 +10,7 @@ and as a component from sibling infrastructure repos.
 | File | Resource | Notes |
 |---|---|---|
 | `namespace.yaml` | `Namespace/pangolin-system` | Drop this if the namespace is created elsewhere — see [Embedding from another kustomization](#embedding-from-another-kustomization). |
+| `badger-shim.yaml` | `Deployment` + `Service` for the badger ext-authz shim | **Not in `kustomization.yaml`** — opt in after setting `SHIM_PANGOLIN_API_BASE_URL`. Required for badger-protected routes unless you set `CONFIG_ALLOW_UNAUTHENTICATED_ROUTES=true`. |
 | `rbac.yaml` | `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` | Cluster-wide read on Gateways; write on HTTPRoute / TCPRoute / UDPRoute / ListenerSet / Service / EndpointSlice / Envoy Gateway `Backend`. |
 | `deployment.yaml` | `Deployment/pangolin-gateway-controller` | Single replica, read-only rootfs, all caps dropped. |
 
@@ -76,7 +77,7 @@ that file for authoritative defaults.
 | `CONFIG_ENABLE_HTTPS_LISTENERS` | `false` | Whether to add HTTPS listeners to the `ListenerSet`. |
 | `CONFIG_ENABLE_TCP_ROUTES` | `false` | Translate pangolin's raw TCP resources into `TCPRoute`s + `TCP` listeners. Each `tcp-<port>` entrypoint becomes a port on the Envoy LoadBalancer Service. |
 | `CONFIG_ENABLE_UDP_ROUTES` | `false` | Same for raw UDP resources / `UDPRoute`. The cloud LB must support mixed TCP+UDP Services; if it doesn't, leave this off. |
-| `CONFIG_EXT_AUTHZ_SERVICE` | _(unset)_ | Service name of an Envoy ext-authz endpoint verifying pangolin sessions. When set, badger-protected routes get a `SecurityPolicy`; when unset they are **skipped**. |
+| `CONFIG_EXT_AUTHZ_SERVICE` | _(unset)_ | Service name of an Envoy ext-authz endpoint verifying pangolin sessions — ship the bundled shim via `badger-shim.yaml` and set this to `pangolin-badger-shim` (port 9001, path `/verify`). When set, badger-protected routes get a `SecurityPolicy`; when unset they are **skipped**. |
 | `CONFIG_ALLOW_UNAUTHENTICATED_ROUTES` | `false` | **Dangerous.** Emit badger-protected routes without authentication. |
 | `CONFIG_TLS_SECRET_TEMPLATE` | _(unset)_ | Required when HTTPS listeners are on. Supports `{hostname}` and `{hostname-dashed}` placeholders. |
 | `CONFIG_HTTPROUTE_ANNOTATIONS` | _(empty)_ | `k=v,k=v` annotations stamped onto every `HTTPRoute`. Typical use: cert-manager cluster-issuer. |
