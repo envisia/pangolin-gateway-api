@@ -53,6 +53,7 @@ fn test_config() -> Config {
         listenerset_annotations: BTreeMap::new(),
         read_only: false,
         log_traefik_config: false,
+        health_listen: None,
     }
 }
 
@@ -447,6 +448,238 @@ fn l4_concrete_sni_router_is_skipped() {
     );
     let ls = desired.listener_sets.values().next().expect("listener set");
     assert!(ls.spec.listeners.iter().all(|l| l.protocol != "TCP"));
+}
+
+#[test]
+fn https_ip_target_gets_backend_tls_in_envoy_mode() {
+    let mut cfg = test_config();
+    cfg.backend_kind = BackendKind::EnvoyBackend;
+
+    let dyn_config: TraefikDynamicConfig = serde_json::from_value(json!({
+        "http": {
+            "routers": {
+                "r1": { "rule": "Host(`a.example.com`)", "service": "verified" },
+                "r2": { "rule": "Host(`b.example.com`)", "service": "skipped" }
+            },
+            "services": {
+                "verified": {
+                    "loadBalancer": { "servers": [{ "url": "https://10.0.0.8:8443" }] }
+                },
+                "skipped": {
+                    "loadBalancer": {
+                        "servers": [{ "url": "https://10.0.0.9:8443" }],
+                        "serversTransport": "skip-tls"
+                    }
+                }
+            },
+            "serversTransports": {
+                "skip-tls": { "insecureSkipVerify": true }
+            }
+        }
+    }))
+    .unwrap();
+    let desired = build_desired(&cfg, &dyn_config);
+
+    assert_eq!(desired.envoy_backends.len(), 2);
+    let verified = desired
+        .envoy_backends
+        .values()
+        .find(|b| b.spec.endpoints[0].ip.as_ref().unwrap().address == "10.0.0.8")
+        .expect("verified backend");
+    let tls = verified.spec.tls.as_ref().expect("tls settings");
+    assert_eq!(tls.well_known_ca_certificates.as_deref(), Some("System"));
+    assert_eq!(tls.insecure_skip_verify, None);
+
+    let skipped = desired
+        .envoy_backends
+        .values()
+        .find(|b| b.spec.endpoints[0].ip.as_ref().unwrap().address == "10.0.0.9")
+        .expect("skip-verify backend");
+    let tls = skipped.spec.tls.as_ref().expect("tls settings");
+    assert_eq!(tls.insecure_skip_verify, Some(true));
+    assert_eq!(tls.well_known_ca_certificates, None);
+}
+
+#[test]
+fn plain_http_targets_get_no_backend_tls() {
+    let mut cfg = test_config();
+    cfg.backend_kind = BackendKind::EnvoyBackend;
+    let dyn_config: TraefikDynamicConfig = serde_json::from_value(json!({
+        "http": {
+            "routers": { "r1": { "rule": "Host(`a.example.com`)", "service": "s1" } },
+            "services": {
+                "s1": { "loadBalancer": { "servers": [{ "url": "http://10.0.0.8:8080" }] } }
+            }
+        }
+    }))
+    .unwrap();
+    let desired = build_desired(&cfg, &dyn_config);
+    assert!(
+        desired
+            .envoy_backends
+            .values()
+            .next()
+            .unwrap()
+            .spec
+            .tls
+            .is_none()
+    );
+    assert!(desired.backend_tls_policies.is_empty());
+}
+
+#[test]
+fn https_cluster_dns_in_envoy_mode_wraps_in_backend() {
+    let mut cfg = test_config();
+    cfg.backend_kind = BackendKind::EnvoyBackend;
+    let dyn_config: TraefikDynamicConfig = serde_json::from_value(json!({
+        "http": {
+            "routers": { "r1": { "rule": "Host(`a.example.com`)", "service": "s1" } },
+            "services": {
+                "s1": {
+                    "loadBalancer": {
+                        "servers": [{ "url": "https://echo.other-ns.svc.cluster.local:8443" }]
+                    }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let desired = build_desired(&cfg, &dyn_config);
+
+    // TLS needs a Backend wrapper instead of the direct Service backendRef.
+    assert_eq!(desired.envoy_backends.len(), 1);
+    let be = desired.envoy_backends.values().next().unwrap();
+    let fqdn = be.spec.endpoints[0].fqdn.as_ref().expect("fqdn endpoint");
+    assert_eq!(fqdn.hostname, "echo.other-ns.svc.cluster.local");
+    let tls = be.spec.tls.as_ref().expect("tls settings");
+    assert_eq!(tls.sni.as_deref(), Some("echo.other-ns.svc.cluster.local"));
+
+    let route = desired.http_routes.values().next().unwrap();
+    let backend_ref = &route.spec.rules.as_ref().unwrap()[0]
+        .backend_refs
+        .as_ref()
+        .unwrap()[0];
+    assert_eq!(backend_ref.kind.as_deref(), Some("Backend"));
+}
+
+#[test]
+fn https_cluster_dns_in_service_mode_emits_backend_tls_policy() {
+    let cfg = test_config(); // service mode; cfg.namespace == "gateway"
+    let dyn_config: TraefikDynamicConfig = serde_json::from_value(json!({
+        "http": {
+            "routers": {
+                "same-ns": { "rule": "Host(`a.example.com`)", "service": "same-ns-svc" },
+                "cross-ns": { "rule": "Host(`b.example.com`)", "service": "cross-ns-svc" }
+            },
+            "services": {
+                "same-ns-svc": {
+                    "loadBalancer": { "servers": [{ "url": "https://echo.gateway.svc.cluster.local:8443" }] }
+                },
+                "cross-ns-svc": {
+                    "loadBalancer": { "servers": [{ "url": "https://echo.elsewhere.svc.cluster.local:8443" }] }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let desired = build_desired(&cfg, &dyn_config);
+
+    // Policies are local objects: only the same-namespace target can get one.
+    assert_eq!(desired.backend_tls_policies.len(), 1);
+    let btp = desired.backend_tls_policies.values().next().unwrap();
+    assert_eq!(btp.spec.target_refs[0].kind, "Service");
+    assert_eq!(btp.spec.target_refs[0].name, "echo");
+    assert_eq!(
+        btp.spec.validation.hostname,
+        "echo.gateway.svc.cluster.local"
+    );
+    assert_eq!(
+        btp.spec.validation.well_known_ca_certificates.as_deref(),
+        Some("System")
+    );
+    // Both routes still emit — the cross-ns one is warned about, not dropped.
+    assert_eq!(desired.http_routes.len(), 2);
+}
+
+#[test]
+fn custom_host_header_becomes_url_rewrite() {
+    let cfg = test_config();
+    // The real-fixture shape: headers middleware with Host + another header,
+    // alongside a path-rewriting middleware on the same router.
+    let dyn_config: TraefikDynamicConfig = serde_json::from_value(json!({
+        "http": {
+            "routers": {
+                "r1": {
+                    "rule": "Host(`a.example.com`)",
+                    "service": "s1",
+                    "middlewares": ["hostset", "prefix"]
+                }
+            },
+            "services": {
+                "s1": { "loadBalancer": { "servers": [{ "url": "http://10.0.0.8:8080" }] } }
+            },
+            "middlewares": {
+                "hostset": {
+                    "headers": {
+                        "customRequestHeaders": { "Host": "internal.example.com", "X-Extra": "1" },
+                        "customResponseHeaders": { "X-Resp": "2" }
+                    }
+                },
+                "prefix": { "addPrefix": { "prefix": "/api" } }
+            }
+        }
+    }))
+    .unwrap();
+    let desired = build_desired(&cfg, &dyn_config);
+
+    let route = desired.http_routes.values().next().expect("route");
+    let filters = route.spec.rules.as_ref().unwrap()[0]
+        .filters
+        .as_ref()
+        .expect("filters");
+
+    // Exactly one URLRewrite carrying BOTH the hostname (from the Host header)
+    // and the path rewrite (from addPrefix) — Gateway API allows the filter
+    // only once per rule.
+    let rewrites: Vec<_> = filters
+        .iter()
+        .filter_map(|f| f.url_rewrite.as_ref())
+        .collect();
+    assert_eq!(
+        rewrites.len(),
+        1,
+        "URLRewrite must be merged into one filter"
+    );
+    assert_eq!(
+        rewrites[0].hostname.as_deref(),
+        Some("internal.example.com")
+    );
+    assert!(
+        rewrites[0].path.is_some(),
+        "path rewrite must survive the merge"
+    );
+
+    // Host must NOT appear as a header modification…
+    let req_mod = filters
+        .iter()
+        .find_map(|f| f.request_header_modifier.as_ref())
+        .expect("request header modifier");
+    let names: Vec<_> = req_mod
+        .set
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(!names.iter().any(|n| n.eq_ignore_ascii_case("host")));
+    assert!(names.contains(&"X-Extra"));
+
+    // …and the response headers must survive alongside the request headers.
+    let resp_mod = filters
+        .iter()
+        .find_map(|f| f.response_header_modifier.as_ref())
+        .expect("response header modifier");
+    assert_eq!(resp_mod.set.as_ref().unwrap()[0].name, "X-Resp");
 }
 
 /// Minimal config with one badger-protected router and one redirect router —

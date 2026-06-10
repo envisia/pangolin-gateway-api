@@ -37,6 +37,7 @@ use url::Url;
 
 use pangolin_gateway_controller::config::{BackendKind, Config};
 use pangolin_gateway_controller::envoy_gateway::Backend as EnvoyBackend;
+use pangolin_gateway_controller::health::Readiness;
 use pangolin_gateway_controller::{pangolin, reconcile};
 
 /// Per-test instance label. Keeps the two test runs from GC-deleting each
@@ -90,6 +91,7 @@ fn integration_config(
 
         read_only: false,
         log_traefik_config: false,
+        health_listen: None,
     }
 }
 
@@ -147,6 +149,19 @@ where
     );
 }
 
+/// Surface the controller's `tracing::warn!`/`error!` output (most importantly
+/// SSA apply failures) in the test output — without this, a failed apply loop
+/// is invisible and the test just times out with no clue why.
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let _ = fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,kube=info")),
+        )
+        .with_test_writer()
+        .try_init();
+}
+
 fn env(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| panic!("{key} must be set"))
 }
@@ -154,6 +169,7 @@ fn env(key: &str) -> String {
 #[tokio::test]
 #[ignore = "requires a real cluster + mock pangolin; see .github/workflows/integration.yml"]
 async fn controller_reconciles_service_backends() {
+    init_tracing();
     let endpoint = env("INTEGRATION_PANGOLIN_URL");
     let namespace = env("INTEGRATION_NAMESPACE");
     let parent_gateway =
@@ -177,9 +193,16 @@ async fn controller_reconciles_service_backends() {
         let cfg = cfg.clone();
         let kube_client = kube_client.clone();
         let shutdown = shutdown.clone();
-        tokio::spawn(
-            async move { reconcile::run_loop(cfg, kube_client, pang_client, shutdown).await },
-        )
+        tokio::spawn(async move {
+            reconcile::run_loop(
+                cfg,
+                kube_client,
+                pang_client,
+                shutdown,
+                Readiness::default(),
+            )
+            .await
+        })
     };
 
     let route_api: Api<HTTPRoute> = Api::namespaced(kube_client.clone(), &namespace);
@@ -226,6 +249,7 @@ async fn controller_reconciles_service_backends() {
 #[tokio::test]
 #[ignore = "requires a real cluster + mock pangolin; see .github/workflows/integration.yml"]
 async fn controller_reconciles_l4_routes() {
+    init_tracing();
     let endpoint = env("INTEGRATION_PANGOLIN_URL");
     let namespace = env("INTEGRATION_NAMESPACE");
     let parent_gateway =
@@ -251,9 +275,16 @@ async fn controller_reconciles_l4_routes() {
         let cfg = cfg.clone();
         let kube_client = kube_client.clone();
         let shutdown = shutdown.clone();
-        tokio::spawn(
-            async move { reconcile::run_loop(cfg, kube_client, pang_client, shutdown).await },
-        )
+        tokio::spawn(async move {
+            reconcile::run_loop(
+                cfg,
+                kube_client,
+                pang_client,
+                shutdown,
+                Readiness::default(),
+            )
+            .await
+        })
     };
 
     let route_api: Api<HTTPRoute> = Api::namespaced(kube_client.clone(), &namespace);
@@ -326,6 +357,7 @@ async fn controller_reconciles_l4_routes() {
 #[ignore = "requires a real cluster + Envoy Gateway Backend CRD + mock pangolin; \
             see .github/workflows/integration.yml"]
 async fn controller_reconciles_envoy_backends() {
+    init_tracing();
     let endpoint = env("INTEGRATION_PANGOLIN_URL");
     let namespace = env("INTEGRATION_NAMESPACE");
     let parent_gateway =
@@ -349,9 +381,16 @@ async fn controller_reconciles_envoy_backends() {
         let cfg = cfg.clone();
         let kube_client = kube_client.clone();
         let shutdown = shutdown.clone();
-        tokio::spawn(
-            async move { reconcile::run_loop(cfg, kube_client, pang_client, shutdown).await },
-        )
+        tokio::spawn(async move {
+            reconcile::run_loop(
+                cfg,
+                kube_client,
+                pang_client,
+                shutdown,
+                Readiness::default(),
+            )
+            .await
+        })
     };
 
     let route_api: Api<HTTPRoute> = Api::namespaced(kube_client.clone(), &namespace);

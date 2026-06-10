@@ -8,7 +8,7 @@ use tracing::{error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use pangolin_gateway_controller::{config::Config, pangolin, reconcile};
+use pangolin_gateway_controller::{config::Config, health, pangolin, reconcile};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -45,7 +45,19 @@ async fn run(cfg: Config, shutdown: tokio_util::sync::CancellationToken) -> anyh
         .await
         .context("connecting to Kubernetes API")?;
     let pangolin_client = pangolin::Client::new(&cfg).context("building pangolin HTTP client")?;
-    reconcile::run_loop(cfg, kube, pangolin_client, shutdown).await
+
+    let ready = health::Readiness::default();
+    if let Some(listen) = cfg.health_listen.clone() {
+        let ready = ready.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            if let Err(e) = health::serve(&listen, ready, shutdown).await {
+                error!(error = ?e, "health endpoint failed");
+            }
+        });
+    }
+
+    reconcile::run_loop(cfg, kube, pangolin_client, shutdown, ready).await
 }
 
 fn spawn_signal_listener(token: tokio_util::sync::CancellationToken) {

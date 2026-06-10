@@ -47,6 +47,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "CONFIG_LISTENERSET_ANNOTATIONS",
     "CONFIG_READ_ONLY",
     "CONFIG_LOG_TRAEFIK_CONFIG",
+    "CONFIG_HEALTH_LISTEN",
 ];
 
 fn clear_all() {
@@ -150,6 +151,7 @@ fn from_env_smoke() {
     assert!(!cfg.enable_udp_routes);
     assert!(cfg.ext_authz.is_none());
     assert!(!cfg.allow_unauthenticated_routes);
+    assert_eq!(cfg.health_listen.as_deref(), Some("0.0.0.0:8081"));
     assert!(!cfg.tls_skip_verify);
     assert!(!cfg.read_only);
     assert!(cfg.httproute_annotations.is_empty());
@@ -181,6 +183,7 @@ fn from_env_smoke() {
     set("CONFIG_EXT_AUTHZ_PORT", "9001");
     set("CONFIG_EXT_AUTHZ_PATH", "/verify");
     set("CONFIG_EXT_AUTHZ_HEADERS_TO_BACKEND", "x-user-id, x-org-id");
+    set("CONFIG_HEALTH_LISTEN", "off");
     set("CONFIG_TLS_SECRET_TEMPLATE", "{hostname-dashed}-tls");
     set("CONFIG_TLS_SECRET_NAMESPACE", "certs");
     set(
@@ -219,6 +222,10 @@ fn from_env_smoke() {
     // Unset → defaults; explicitly set → parsed csv.
     assert_eq!(ea.headers_to_ext_auth, vec!["cookie", "authorization"]);
     assert_eq!(ea.headers_to_backend, vec!["x-user-id", "x-org-id"]);
+    assert!(
+        cfg.health_listen.is_none(),
+        "CONFIG_HEALTH_LISTEN=off disables"
+    );
     assert_eq!(
         cfg.tls_secret_template.as_deref(),
         Some("{hostname-dashed}-tls")

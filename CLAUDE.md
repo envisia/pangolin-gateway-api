@@ -113,11 +113,21 @@ selector and deletes names not present in the corresponding desired map.
     mode-agnostic. `build_l4_backends` is the L4 twin: same classifier fed from
     `address` (`host:port`, stray scheme tolerated) instead of `url`;
     synthesized names get a `-tcp-`/`-udp-` infix and the right port protocol.
+
+    `https://` targets get TLS origination: envoy-backend mode via
+    `Backend.spec.tls` (skip-verify comes from the pangolin service's
+    `serversTransport.insecureSkipVerify`; cluster-DNS https targets are
+    wrapped in an FQDN `Backend` instead of passing through), service mode via
+    `BackendTLSPolicy` (same-namespace targets only, no skip-verify — warned).
   - `middleware.rs` — small allow-list mapping `redirectScheme`, `headers`,
     `addPrefix`, `replacePath`, `stripPrefix` to Gateway API filters.
-    `replacePathRegex` is intentionally skipped. `requires_badger_auth` detects
-    pangolin's `badger` auth plugin — it is never a filter; auth is decided
-    per-route (see below).
+    `replacePathRegex` is intentionally skipped. A `Host` entry in
+    `customRequestHeaders` (pangolin's custom-Host-header option) becomes
+    `URLRewrite{hostname}` — Gateway API forbids Host via header modifiers.
+    `merge_filters` collapses URLRewrite / Request- / ResponseHeaderModifier
+    to at most one each per rule (Gateway API requirement).
+    `requires_badger_auth` detects pangolin's `badger` auth plugin — it is
+    never a filter; auth is decided per-route (see below).
   - `route.rs` — one `HTTPRoute` per pangolin router, parentRef = our
     `ListenerSet`. Badger-protected routers (pangolin attaches badger to every
     non-redirect router) are: wired to a `SecurityPolicy` when
@@ -153,13 +163,19 @@ selector and deletes names not present in the corresponding desired map.
   changing field names. Env prefix is `SHIM_`, not `CONFIG_`. Fails closed
   (503) when pangolin is unreachable.
 - `src/gc.rs` — generic sweep over `Api<T>` by the managed-by selector.
+- `src/health.rs` — `/healthz` + `/readyz` for the controller binary
+  (`CONFIG_HEALTH_LISTEN`, default `0.0.0.0:8081`). Readiness is sticky: set
+  after the first successful poll cycle, never unset.
 - `src/reconcile.rs` — outer loop: fetch → if changed transform+apply+gc → wait.
-  Apply order is `Service → EndpointSlice → Backend → ListenerSet → HTTPRoute →
-  TCPRoute → UDPRoute → SecurityPolicy`. GC happens after every successful
-  apply round. The `Backend` sweep is gated on `cfg.backend_kind ==
-  EnvoyBackend`, the TCPRoute/UDPRoute sweeps on their enable flags, and the
-  SecurityPolicy sweep on `cfg.ext_authz.is_some()` — the CRDs may not even be
-  installed otherwise, so we don't list them.
+  Apply order is `Service → EndpointSlice → Backend → BackendTLSPolicy →
+  ListenerSet → HTTPRoute → TCPRoute → UDPRoute → SecurityPolicy`. GC happens
+  after every successful apply round. The `Backend` sweep is gated on
+  `cfg.backend_kind == EnvoyBackend`, the TCPRoute/UDPRoute sweeps on their
+  enable flags, and the SecurityPolicy sweep on `cfg.ext_authz.is_some()` —
+  the CRDs may not even be installed otherwise, so we don't list them. After
+  GC, `report_status` warns about any managed object carrying a
+  `status=False` condition (rejected routes/listeners are otherwise invisible
+  outside `kubectl describe`).
 
 ## Configurable annotation hook
 
